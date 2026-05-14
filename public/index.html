@@ -34,16 +34,61 @@
         <input type="password" id="api_key" placeholder="Cole sua chave aqui..." autocomplete="off" />
       </div>
 
-      <h2 style="margin-top:24px">2. Arquivo</h2>
-      <div class="drop-zone" id="drop-zone">
-        <div class="drop-icon">&#x1F4C2;</div>
-        <p>Arraste o arquivo aqui ou <span class="link">clique para selecionar</span></p>
-        <small>Suporta: .txt, .md, .pdf, .xlsx, .xls</small>
-        <input type="file" id="file-input" accept=".txt,.md,.pdf,.xlsx,.xls" hidden />
+      <!-- ABAS -->
+      <div class="tabs" style="margin-top:24px">
+        <button class="tab-btn active" id="tab-file-btn" data-tab="file">Arquivo</button>
+        <button class="tab-btn" id="tab-url-btn" data-tab="url">URL / Site</button>
       </div>
-      <div id="file-name" class="file-name hidden"></div>
 
-      <button class="btn-primary" id="upload-btn" disabled>Criar RAG</button>
+      <!-- ABA ARQUIVO -->
+      <div id="tab-file" class="tab-content">
+        <div class="drop-zone" id="drop-zone">
+          <div class="drop-icon">&#x1F4C2;</div>
+          <p>Arraste o arquivo aqui ou <span class="link">clique para selecionar</span></p>
+          <small>Suporta: .txt, .md, .pdf, .xlsx, .xls</small>
+          <input type="file" id="file-input" accept=".txt,.md,.pdf,.xlsx,.xls" hidden />
+        </div>
+        <div id="file-name" class="file-name hidden"></div>
+        <button class="btn-primary" id="upload-btn" disabled>Criar RAG</button>
+      </div>
+
+      <!-- ABA URL -->
+      <div id="tab-url" class="tab-content hidden">
+        <div class="field">
+          <label for="url-input">URL da página ou base de documentação</label>
+          <input type="url" id="url-input" placeholder="https://docs.exemplo.com/..." />
+        </div>
+        <div class="depth-row">
+          <span class="depth-label">Profundidade:</span>
+          <div class="depth-options">
+            <label class="depth-opt"><input type="radio" name="depth" value="1" /> 1 nível</label>
+            <label class="depth-opt"><input type="radio" name="depth" value="2" checked /> 2 níveis</label>
+            <label class="depth-opt"><input type="radio" name="depth" value="3" /> 3 níveis</label>
+            <label class="depth-opt"><input type="radio" name="depth" value="0" /> Sem limite</label>
+          </div>
+        </div>
+        <label class="js-toggle">
+          <input type="checkbox" id="use-js" />
+          <span class="js-toggle-label">
+            <strong>Renderização JavaScript</strong>
+            <small>Para sites dinâmicos (ex: Zoho Desk, Confluence, SPAs). Mais lento.</small>
+          </span>
+        </label>
+        <button class="btn-primary" id="scan-btn" disabled>Escanear páginas</button>
+
+        <!-- LISTA DE CONFIRMAÇÃO -->
+        <div id="pages-panel" class="pages-panel hidden">
+          <div class="pages-header">
+            <span id="pages-count"></span>
+            <div class="pages-actions">
+              <button class="btn-text" id="select-all-btn">Selecionar tudo</button>
+              <button class="btn-text" id="deselect-all-btn">Desmarcar tudo</button>
+            </div>
+          </div>
+          <div id="pages-list" class="pages-list"></div>
+          <button class="btn-primary" id="scrape-btn">Criar RAG com páginas selecionadas</button>
+        </div>
+      </div>
 
       <div id="progress-log" class="progress-log hidden"></div>
       <div id="upload-status" class="status hidden"></div>
@@ -54,7 +99,7 @@
       <div class="result-header">RAG criado com sucesso!</div>
       <div class="result-fields">
         <div class="result-field">
-          <span class="result-label">Arquivo</span>
+          <span class="result-label">Fonte</span>
           <span class="result-value" id="r-filename"></span>
         </div>
         <div class="result-field">
@@ -82,7 +127,6 @@
         <button class="btn-send" id="send-btn">Enviar</button>
       </div>
     </section>
-
   </div>
 
   <script src="/script.js"></script>

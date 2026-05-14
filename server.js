@@ -215,6 +215,142 @@ app.post('/query', (req, res) => {
   });
 });
 
+// ─── POST /crawl — escaneia URLs, retorna lista para confirmação
+app.post('/crawl', (req, res) => {
+  const { url, depth = 2 } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'URL obrigatória.' });
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+
+  res.json({ jobId });
+
+  const { use_js: useJs = false } = req.body;
+  const crawlArgs = [
+    path.join(__dirname, 'rag_worker.py'), 'crawl',
+    '--url',   url,
+    '--depth', String(depth),
+  ];
+  if (useJs) crawlArgs.push('--js');
+
+  const py = spawn('python', crawlArgs);
+
+  let buf = '';
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) {
+        emitter.emit('progress', t.slice('PROGRESS:'.length));
+      } else if (t.startsWith('RESULT:')) {
+        try {
+          const r   = JSON.parse(t.slice('RESULT:'.length));
+          const job = jobs.get(jobId);
+          job.result = r;
+          job.status = 'done';
+          emitter.emit('done', r);
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error';
+          job.error  = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error';
+        job.error  = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error';
+      job.error  = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
+});
+
+// ─── POST /scrape — scrapa páginas confirmadas e cria RAG ─────
+app.post('/scrape', (req, res) => {
+  const { urls, api_key: apiKey, ai_type: aiType, name } = req.body || {};
+  if (!urls?.length || !apiKey || !aiType || !name) {
+    return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
+  }
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+
+  res.json({ jobId });
+
+  const urlsFile = path.join(__dirname, 'uploads', `urls_${jobId}.json`);
+  fs.writeFileSync(urlsFile, JSON.stringify(urls));
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'scrape',
+    '--provider',  aiType,
+    '--key',       apiKey,
+    '--urls-file', urlsFile,
+    '--name',      name,
+  ]);
+
+  let buf = '';
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) {
+        emitter.emit('progress', t.slice('PROGRESS:'.length));
+      } else if (t.startsWith('RESULT:')) {
+        try {
+          const r = JSON.parse(t.slice('RESULT:'.length));
+          r.filename = name;
+          saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
+          const job = jobs.get(jobId);
+          job.result = r;
+          job.status = 'done';
+          emitter.emit('done', r);
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error';
+          job.error  = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error';
+        job.error  = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    fs.unlink(urlsFile, () => {});
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error';
+      job.error  = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
+});
+
 // ─── GET /rags ────────────────────────────────────────────────
 app.get('/rags', async (_req, res) => {
   try { res.json(await listRags()); } catch { res.json([]); }

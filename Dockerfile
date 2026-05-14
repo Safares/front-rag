@@ -15,7 +15,8 @@ RUN npm ci --omit=dev
 
 # Python deps
 COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt --break-system-packages
+RUN pip3 install --no-cache-dir -r requirements.txt --break-system-packages && \
+    playwright install chromium --with-deps
 
 # Source
 COPY . .

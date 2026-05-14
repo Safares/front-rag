@@ -188,6 +188,195 @@ def query_gemini(api_key: str, store_name: str, question: str) -> str:
     return response.text
 
 
+# ─── Web crawl ────────────────────────────────────────────────
+
+MAX_PAGES = 300
+
+
+def _links_from_html(html: str, base_url: str, base_domain: str) -> list[str]:
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin, urlparse, urldefrag
+    soup = BeautifulSoup(html, "lxml")
+    found = []
+    for a in soup.find_all("a", href=True):
+        href, _ = urldefrag(urljoin(base_url, a["href"]))
+        p = urlparse(href)
+        if p.netloc == base_domain and p.scheme in ("http", "https"):
+            found.append(href)
+    return found
+
+
+def crawl_site(url: str, depth: int, use_js: bool = False) -> list[dict]:
+    """Descobre páginas dentro do mesmo domínio.
+    depth=0 significa sem limite (até MAX_PAGES).
+    use_js=True usa Playwright para renderizar JavaScript.
+    """
+    from urllib.parse import urlparse, urldefrag
+    visited: set[str] = set()
+    pages:   list[dict] = []
+    base_domain = urlparse(url).netloc
+    effective_depth = depth if depth > 0 else 999
+
+    if use_js:
+        _crawl_js(url, effective_depth, visited, pages, base_domain)
+    else:
+        _crawl_requests(url, effective_depth, 1, visited, pages, base_domain)
+
+    return pages
+
+
+def _crawl_requests(current: str, depth: int, level: int,
+                    visited: set, pages: list, base_domain: str) -> None:
+    import requests
+    from urllib.parse import urldefrag
+
+    if len(pages) >= MAX_PAGES:
+        return
+    current, _ = urldefrag(current)
+    if current in visited:
+        return
+    visited.add(current)
+
+    headers = {"User-Agent": "Mozilla/5.0 (RAG-crawler/1.0)"}
+    try:
+        r = requests.get(current, timeout=12, headers=headers)
+        if "text/html" not in r.headers.get("Content-Type", ""):
+            return
+        from bs4 import BeautifulSoup
+        soup  = BeautifulSoup(r.content, "lxml")
+        title = (soup.title.string or current).strip()
+        pages.append({"title": title, "url": current})
+        progress(f"[{len(pages)}] {title}")
+
+        if level < depth:
+            for href in _links_from_html(r.text, current, base_domain):
+                _crawl_requests(href, depth, level + 1, visited, pages, base_domain)
+    except Exception as e:
+        progress(f"Ignorado ({current}): {e}")
+
+
+def _crawl_js(start: str, depth: int,
+              visited: set, pages: list, base_domain: str) -> None:
+    """Crawl usando Playwright (para SPAs / JavaScript)."""
+    from urllib.parse import urldefrag
+    from playwright.sync_api import sync_playwright
+
+    queue = [(start, 1)]
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page    = browser.new_page()
+        page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (RAG-crawler/1.0)"})
+
+        while queue and len(pages) < MAX_PAGES:
+            current, level = queue.pop(0)
+            current, _ = urldefrag(current)
+            if current in visited:
+                continue
+            visited.add(current)
+
+            try:
+                page.goto(current, wait_until="networkidle", timeout=25000)
+                title = page.title() or current
+                html  = page.content()
+                pages.append({"title": title.strip(), "url": current})
+                progress(f"[{len(pages)}] {title.strip()}")
+
+                if level < depth:
+                    for href in _links_from_html(html, current, base_domain):
+                        if href not in visited:
+                            queue.append((href, level + 1))
+            except Exception as e:
+                progress(f"Ignorado ({current}): {e}")
+
+        browser.close()
+
+
+# ─── Scrape URLs → RAG ────────────────────────────────────────
+
+def _extract_text(html: bytes, url: str) -> str:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        tag.decompose()
+    title = (soup.title.string or url).strip()
+    body  = soup.get_text(separator="\n", strip=True)
+    return f"## {title}\n\nURL: {url}\n\n{body}"
+
+
+def scrape_and_upload(api_key: str, provider: str, urls: list[str], name: str) -> dict:
+    import io
+    import requests
+
+    headers = {"User-Agent": "Mozilla/5.0 (RAG-crawler/1.0)"}
+    parts   = []
+
+    for i, url in enumerate(urls, 1):
+        try:
+            r = requests.get(url, timeout=15, headers=headers)
+            parts.append(_extract_text(r.content, url))
+            progress(f"[{i}/{len(urls)}] Extraído: {url}")
+        except Exception as e:
+            progress(f"[{i}/{len(urls)}] Erro em {url}: {e}")
+
+    if not parts:
+        error("Nenhuma página pôde ser extraída.")
+
+    combined      = "\n\n---\n\n".join(parts)
+    content_bytes = combined.encode("utf-8")
+    upload_name   = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60] + ".txt"
+
+    if provider == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+        progress("Criando Vector Store...")
+        vs = client.vector_stores.create(name=f"kb-{name[:40]}")
+        progress(f"Vector Store criado: {vs.id}")
+
+        progress(f"Enviando {len(content_bytes) / 1024:.1f} KB...")
+        client.vector_stores.files.upload_and_poll(
+            vector_store_id=vs.id,
+            file=(upload_name, io.BytesIO(content_bytes), "text/plain"),
+        )
+        progress("Indexacao concluida!")
+        return {"store_id": vs.id, "store_name": vs.name, "provider": "openai"}
+
+    else:
+        from google import genai
+        client    = genai.Client(api_key=api_key)
+        safe_name = _ascii_filename(upload_name)
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+        try:
+            tmp.write(content_bytes)
+            tmp.close()
+
+            progress("Criando File Search Store...")
+            store = client.file_search_stores.create(
+                config={"display_name": _ascii_safe(f"kb-{name[:40]}")}
+            )
+            progress(f"Store criado: {store.name}")
+
+            progress(f"Enviando {len(content_bytes) / 1024:.1f} KB...")
+            operation = client.file_search_stores.upload_to_file_search_store(
+                file=tmp.name,
+                file_search_store_name=store.name,
+                config={"display_name": _ascii_safe(upload_name)},
+            )
+        finally:
+            os.unlink(tmp.name)
+
+        progress("Indexando (pode levar alguns minutos)...")
+        while not operation.done:
+            time.sleep(5)
+            operation = client.operations.get(operation)
+            progress("...aguardando indexacao")
+
+        progress("Indexacao concluida!")
+        return {"store_id": store.name, "store_name": store.name, "provider": "gemini"}
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -205,25 +394,49 @@ def main():
     qr.add_argument("--store", required=True)
     qr.add_argument("--question", required=True)
 
+    cw = sub.add_parser("crawl")
+    cw.add_argument("--url",   required=True)
+    cw.add_argument("--depth", type=int, default=2)  # 0 = sem limite
+    cw.add_argument("--js",    action="store_true")
+
+    sc = sub.add_parser("scrape")
+    sc.add_argument("--provider",   required=True, choices=["openai", "gemini"])
+    sc.add_argument("--key",        required=True)
+    sc.add_argument("--urls-file",  required=True)
+    sc.add_argument("--name",       required=True)
+
     args = parser.parse_args()
 
     if args.cmd == "upload":
         try:
-            if args.provider == "openai":
-                data = upload_openai(args.key, args.file)
-            else:
-                data = upload_gemini(args.key, args.file)
+            data = upload_openai(args.key, args.file) if args.provider == "openai" \
+                   else upload_gemini(args.key, args.file)
             result(data)
         except Exception as e:
             error(str(e))
 
     elif args.cmd == "query":
         try:
-            if args.provider == "openai":
-                answer = query_openai(args.key, args.store, args.question)
-            else:
-                answer = query_gemini(args.key, args.store, args.question)
+            answer = query_openai(args.key, args.store, args.question) \
+                     if args.provider == "openai" \
+                     else query_gemini(args.key, args.store, args.question)
             result({"answer": answer})
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "crawl":
+        try:
+            pages = crawl_site(args.url, args.depth, use_js=args.js)
+            result({"pages": pages})
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "scrape":
+        try:
+            with open(args.urls_file) as f:
+                urls = json.load(f)
+            data = scrape_and_upload(args.key, args.provider, urls, args.name)
+            result(data)
         except Exception as e:
             error(str(e))
 
