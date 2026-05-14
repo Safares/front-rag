@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAG Builder</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>RAG Builder</h1>
+      <p>Crie uma base de conhecimento com OpenAI ou Gemini</p>
+    </header>
+
+    <!-- CONFIGURAÇÃO -->
+    <section class="card" id="config-panel">
+      <h2>1. Provedor</h2>
+      <div class="ai-selector">
+        <label class="ai-option" id="opt-openai">
+          <input type="radio" name="ai_type" value="openai" checked />
+          <span class="ai-icon">&#x1F916;</span>
+          <span>OpenAI GPT</span>
+        </label>
+        <label class="ai-option" id="opt-gemini">
+          <input type="radio" name="ai_type" value="gemini" />
+          <span class="ai-icon">&#x2728;</span>
+          <span>Google Gemini</span>
+        </label>
+      </div>
+
+      <div class="field">
+        <label for="api_key">API Key / Token</label>
+        <input type="password" id="api_key" placeholder="Cole sua chave aqui..." autocomplete="off" />
+      </div>
+
+      <h2 style="margin-top:24px">2. Arquivo</h2>
+      <div class="drop-zone" id="drop-zone">
+        <div class="drop-icon">&#x1F4C2;</div>
+        <p>Arraste o arquivo aqui ou <span class="link">clique para selecionar</span></p>
+        <small>Suporta: .txt, .md, .pdf, .xlsx, .xls</small>
+        <input type="file" id="file-input" accept=".txt,.md,.pdf,.xlsx,.xls" hidden />
+      </div>
+      <div id="file-name" class="file-name hidden"></div>
+
+      <button class="btn-primary" id="upload-btn" disabled>Criar RAG</button>
+
+      <div id="progress-log" class="progress-log hidden"></div>
+      <div id="upload-status" class="status hidden"></div>
+    </section>
+
+    <!-- RESULTADO -->
+    <section class="card result-card hidden" id="result-panel">
+      <div class="result-header">RAG criado com sucesso!</div>
+      <div class="result-fields">
+        <div class="result-field">
+          <span class="result-label">Arquivo</span>
+          <span class="result-value" id="r-filename"></span>
+        </div>
+        <div class="result-field">
+          <span class="result-label">Provedor</span>
+          <span class="result-value" id="r-provider"></span>
+        </div>
+        <div class="result-field">
+          <span class="result-label">Store ID</span>
+          <code class="result-code" id="r-store-id"></code>
+        </div>
+        <div class="result-field">
+          <span class="result-label">Salvo em</span>
+          <span class="result-value" id="r-saved"></span>
+        </div>
+      </div>
+      <button class="btn-copy" id="copy-btn">Copiar Store ID</button>
+    </section>
+
+    <!-- CHAT -->
+    <section class="card hidden" id="chat-panel">
+      <h2>Chat com o documento</h2>
+      <div class="chat-box" id="chat-box"></div>
+      <div class="chat-input-row">
+        <input type="text" id="question-input" placeholder="Faça uma pergunta sobre o documento..." />
+        <button class="btn-send" id="send-btn">Enviar</button>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="/script.js"></script>
+</body>
+</html>

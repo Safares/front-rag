@@ -1,0 +1,19 @@
+{
+  "name": "claude-rag",
+  "version": "1.0.0",
+  "description": "RAG local com Gemini e GPT",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.0",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "multer": "^2.1.1",
+    "openai": "^4.95.0",
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.20.0"
+  }
+}
