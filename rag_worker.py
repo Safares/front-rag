@@ -2,7 +2,7 @@
 """
 Worker chamado pelo server.js.
 Uso:
-  python rag_worker.py upload --provider openai|gemini --key KEY --file PATH
+  python rag_worker.py upload --provider openai|gemini --key KEY --files-file PATH_JSON
   python rag_worker.py query  --provider openai|gemini --key KEY --store STORE_ID --question "..."
 """
 
@@ -94,26 +94,43 @@ def _ascii_filename(name: str) -> str:
 
 # ─── OpenAI ───────────────────────────────────────────────────
 
-def upload_openai(api_key: str, file_path: str) -> dict:
+def upload_openai(api_key: str, file_entries: list) -> dict:
     import io
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    path = Path(file_path)
-    content_bytes, upload_name = read_file_as_bytes(path)
+    total      = len(file_entries)
+    first_stem = Path(file_entries[0]['name']).stem if file_entries else 'kb'
 
     progress("Criando Vector Store...")
-    vs = client.vector_stores.create(name=f"kb-{path.stem}")
+    vs = client.vector_stores.create(name=f"kb-{first_stem}")
     progress(f"Vector Store criado: {vs.id}")
 
-    progress(f"Enviando {upload_name} ({len(content_bytes) / 1024:.1f} KB)...")
-    client.vector_stores.files.upload_and_poll(
-        vector_store_id=vs.id,
-        file=(upload_name, io.BytesIO(content_bytes), "text/plain"),
-    )
+    uploaded: list[str] = []
+    failed:   list[str] = []
+
+    for i, entry in enumerate(file_entries, 1):
+        fp   = Path(entry['path'])
+        name = entry['name']
+        try:
+            content_bytes, upload_name = read_file_as_bytes(fp)
+            progress(f"[{i}/{total}] Enviando {name} ({len(content_bytes) / 1024:.1f} KB)...")
+            client.vector_stores.files.upload_and_poll(
+                vector_store_id=vs.id,
+                file=(upload_name, io.BytesIO(content_bytes), "text/plain"),
+            )
+            uploaded.append(name)
+            progress(f"[{i}/{total}] {name} indexado.")
+        except Exception as e:
+            failed.append(name)
+            progress(f"[{i}/{total}] ERRO em {name}: {e}")
+
+    if not uploaded:
+        error("Nenhum arquivo pôde ser indexado.")
 
     progress("Indexacao concluida!")
-    return {"store_id": vs.id, "store_name": vs.name, "provider": "openai"}
+    return {"store_id": vs.id, "store_name": vs.name, "provider": "openai",
+            "files_uploaded": uploaded, "files_failed": failed}
 
 
 def query_openai(api_key: str, store_id: str, question: str) -> str:
@@ -129,42 +146,59 @@ def query_openai(api_key: str, store_id: str, question: str) -> str:
 
 # ─── Gemini ───────────────────────────────────────────────────
 
-def upload_gemini(api_key: str, file_path: str) -> dict:
+def upload_gemini(api_key: str, file_entries: list) -> dict:
+    import tempfile
+    import os
     from google import genai
 
-    client = genai.Client(api_key=api_key)
-    path = Path(file_path)
-    content_bytes, upload_name = read_file_as_bytes(path)
+    client     = genai.Client(api_key=api_key)
+    total      = len(file_entries)
+    first_stem = Path(file_entries[0]['name']).stem if file_entries else 'kb'
 
-    safe_name = _ascii_filename(upload_name)
-    tmp_path = path.parent / safe_name
-    tmp_path.write_bytes(content_bytes)
+    progress("Criando File Search Store...")
+    store = client.file_search_stores.create(
+        config={"display_name": _ascii_safe(f"kb-{first_stem}")}
+    )
+    progress(f"Store criado: {store.name}")
 
-    try:
-        progress("Criando File Search Store...")
-        store = client.file_search_stores.create(
-            config={"display_name": _ascii_safe(f"kb-{path.stem}")}
-        )
-        progress(f"Store criado: {store.name}")
+    uploaded: list[str] = []
+    failed:   list[str] = []
 
-        progress(f"Enviando {upload_name} ({len(content_bytes) / 1024:.1f} KB)...")
-        operation = client.file_search_stores.upload_to_file_search_store(
-            file=str(tmp_path),
-            file_search_store_name=store.name,
-            config={"display_name": _ascii_safe(upload_name)},
-        )
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+    for i, entry in enumerate(file_entries, 1):
+        fp   = Path(entry['path'])
+        name = entry['name']
+        try:
+            content_bytes, upload_name = read_file_as_bytes(fp)
+            safe_name = _ascii_filename(upload_name)
+            progress(f"[{i}/{total}] Enviando {name} ({len(content_bytes) / 1024:.1f} KB)...")
+            tmp = tempfile.NamedTemporaryFile(suffix=Path(safe_name).suffix, delete=False)
+            try:
+                tmp.write(content_bytes)
+                tmp.close()
+                operation = client.file_search_stores.upload_to_file_search_store(
+                    file=tmp.name,
+                    file_search_store_name=store.name,
+                    config={"display_name": _ascii_safe(upload_name)},
+                )
+            finally:
+                os.unlink(tmp.name)
+            progress(f"[{i}/{total}] Indexando {name}...")
+            while not operation.done:
+                time.sleep(5)
+                operation = client.operations.get(operation)
+                progress(f"[{i}/{total}] ...aguardando {name}")
+            uploaded.append(name)
+            progress(f"[{i}/{total}] {name} indexado.")
+        except Exception as e:
+            failed.append(name)
+            progress(f"[{i}/{total}] ERRO em {name}: {e}")
 
-    progress("Indexando (pode levar alguns minutos)...")
-    while not operation.done:
-        time.sleep(5)
-        operation = client.operations.get(operation)
-        progress("...aguardando indexacao")
+    if not uploaded:
+        error("Nenhum arquivo pôde ser indexado.")
 
     progress("Indexacao concluida!")
-    return {"store_id": store.name, "store_name": store.name, "provider": "gemini"}
+    return {"store_id": store.name, "store_name": store.name, "provider": "gemini",
+            "files_uploaded": uploaded, "files_failed": failed}
 
 
 def query_gemini(api_key: str, store_name: str, question: str) -> str:
@@ -386,7 +420,7 @@ def main():
     up = sub.add_parser("upload")
     up.add_argument("--provider", required=True, choices=["openai", "gemini"])
     up.add_argument("--key", required=True)
-    up.add_argument("--file", required=True)
+    up.add_argument("--files-file", required=True, dest="files_file")
 
     qr = sub.add_parser("query")
     qr.add_argument("--provider", required=True, choices=["openai", "gemini"])
@@ -409,8 +443,10 @@ def main():
 
     if args.cmd == "upload":
         try:
-            data = upload_openai(args.key, args.file) if args.provider == "openai" \
-                   else upload_gemini(args.key, args.file)
+            with open(args.files_file) as f:
+                file_entries = json.load(f)
+            data = upload_openai(args.key, file_entries) if args.provider == "openai" \
+                   else upload_gemini(args.key, file_entries)
             result(data)
         except Exception as e:
             error(str(e))

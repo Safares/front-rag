@@ -44,11 +44,11 @@
       <div id="tab-file" class="tab-content">
         <div class="drop-zone" id="drop-zone">
           <div class="drop-icon">&#x1F4C2;</div>
-          <p>Arraste o arquivo aqui ou <span class="link">clique para selecionar</span></p>
-          <small>Suporta: .txt, .md, .pdf, .xlsx, .xls</small>
-          <input type="file" id="file-input" accept=".txt,.md,.pdf,.xlsx,.xls" hidden />
+          <p>Arraste os arquivos aqui ou <span class="link">clique para selecionar</span></p>
+          <small>Suporta: .txt, .md, .pdf, .xlsx, .xls &middot; Múltiplos permitidos</small>
+          <input type="file" id="file-input" accept=".txt,.md,.pdf,.xlsx,.xls" multiple hidden />
         </div>
-        <div id="file-name" class="file-name hidden"></div>
+        <div id="file-list" class="file-list hidden"></div>
         <button class="btn-primary" id="upload-btn" disabled>Criar RAG</button>
       </div>
 

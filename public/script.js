@@ -3,7 +3,7 @@
 // ─── Elementos ────────────────────────────────────────────────
 const dropZone      = document.getElementById('drop-zone');
 const fileInput     = document.getElementById('file-input');
-const fileNameEl    = document.getElementById('file-name');
+const fileListEl    = document.getElementById('file-list');
 const uploadBtn     = document.getElementById('upload-btn');
 const urlInput      = document.getElementById('url-input');
 const scanBtn       = document.getElementById('scan-btn');
@@ -23,7 +23,7 @@ const sendBtn       = document.getElementById('send-btn');
 const apiKeyInput   = document.getElementById('api_key');
 const copyBtn       = document.getElementById('copy-btn');
 
-let selectedFile = null;
+let selectedFiles = [];
 let session = { apiKey: '', aiType: '', storeId: '' };
 
 // ─── Abas ─────────────────────────────────────────────────────
@@ -43,24 +43,60 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover
 dropZone.addEventListener('drop', (e) => {
   e.preventDefault();
   dropZone.classList.remove('dragover');
-  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
-fileInput.addEventListener('change', () => { if (fileInput.files[0]) setFile(fileInput.files[0]); });
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) addFiles(fileInput.files);
+  fileInput.value = '';
+});
 
-function setFile(file) {
-  const allowed = ['.txt', '.md', '.pdf', '.xlsx', '.xls'];
-  const ext = '.' + file.name.split('.').pop().toLowerCase();
-  if (!allowed.includes(ext)) { showStatus('Formato não suportado.', 'error'); return; }
-  selectedFile = file;
-  fileNameEl.textContent = file.name;
-  fileNameEl.classList.remove('hidden');
+const ALLOWED_EXTS = ['.txt', '.md', '.pdf', '.xlsx', '.xls'];
+
+function addFiles(fileList) {
+  let added = 0;
+  for (const file of fileList) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    if (!ALLOWED_EXTS.includes(ext)) { showStatus(`Formato não suportado: ${file.name}`, 'error'); continue; }
+    if (selectedFiles.some(f => f.name === file.name)) continue;
+    selectedFiles.push(file);
+    added++;
+  }
+  if (added > 0) hideStatus();
+  renderFileList();
   checkFileReady();
+}
+
+function renderFileList() {
+  if (!selectedFiles.length) { fileListEl.classList.add('hidden'); return; }
+  fileListEl.classList.remove('hidden');
+  fileListEl.innerHTML = '';
+  selectedFiles.forEach((file, i) => {
+    const size = file.size < 1024 * 1024
+      ? `${(file.size / 1024).toFixed(1)} KB`
+      : `${(file.size / 1024 / 1024).toFixed(1)} MB`;
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.innerHTML = `
+      <div class="file-item-info">
+        <span class="file-item-name">${file.name}</span>
+        <span class="file-item-size">${size}</span>
+      </div>
+      <button class="file-remove" data-idx="${i}" title="Remover">&times;</button>
+    `;
+    item.querySelector('.file-remove').addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectedFiles.splice(Number(e.currentTarget.dataset.idx), 1);
+      renderFileList();
+      checkFileReady();
+    });
+    fileListEl.appendChild(item);
+  });
 }
 
 apiKeyInput.addEventListener('input', () => { checkFileReady(); checkUrlReady(); });
 urlInput.addEventListener('input', checkUrlReady);
 
-function checkFileReady() { uploadBtn.disabled = !(selectedFile && apiKeyInput.value.trim()); }
+function checkFileReady() { uploadBtn.disabled = !(selectedFiles.length > 0 && apiKeyInput.value.trim()); }
 function checkUrlReady()  { scanBtn.disabled   = !(urlInput.value.trim() && apiKeyInput.value.trim()); }
 function getAiType()      { return document.querySelector('input[name="ai_type"]:checked').value; }
 function getDepth()  { return Number(document.querySelector('input[name="depth"]:checked').value); }
@@ -68,14 +104,14 @@ function getUseJs()  { return document.getElementById('use-js').checked; }
 
 // ─── Criar RAG por arquivo ────────────────────────────────────
 uploadBtn.addEventListener('click', async () => {
-  if (!selectedFile || !apiKeyInput.value.trim()) return;
+  if (!selectedFiles.length || !apiKeyInput.value.trim()) return;
   uploadBtn.disabled = true;
   hideStatus(); clearLog();
   progressLog.classList.remove('hidden');
-  appendLog('Enviando arquivo...');
+  appendLog(`Enviando ${selectedFiles.length} arquivo${selectedFiles.length > 1 ? 's' : ''}...`);
 
   const formData = new FormData();
-  formData.append('file',    selectedFile);
+  for (const file of selectedFiles) formData.append('files', file);
   formData.append('api_key', apiKeyInput.value.trim());
   formData.append('ai_type', getAiType());
 

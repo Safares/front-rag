@@ -8,7 +8,7 @@ const { spawn }        = require('child_process');
 const { EventEmitter } = require('events');
 
 const app    = express();
-const upload = multer({ dest: path.join(__dirname, 'uploads') });
+const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 100 * 1024 * 1024 } });
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -72,9 +72,9 @@ const jobs = new Map();
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // ─── POST /upload ─────────────────────────────────────────────
-app.post('/upload', upload.single('file'), (req, res) => {
+app.post('/upload', upload.array('files', 20), (req, res) => {
   const { api_key: apiKey, ai_type: aiType } = req.body;
-  if (!req.file || !apiKey || !aiType) {
+  if (!req.files?.length || !apiKey || !aiType) {
     return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
   }
 
@@ -85,19 +85,32 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
   res.json({ jobId });
 
-  const workerPath   = path.join(__dirname, 'rag_worker.py');
-  const originalName = req.file.originalname;
+  const workerPath = path.join(__dirname, 'rag_worker.py');
 
-  // Multer salva sem extensão — renomeia para o Python reconhecer o formato
-  const origExt  = path.extname(originalName).toLowerCase();
-  const filePath = origExt ? req.file.path + origExt : req.file.path;
-  if (origExt) fs.renameSync(req.file.path, filePath);
+  // Multer salva sem extensão — renomeia cada arquivo para o Python reconhecer o formato
+  const renamedPaths = req.files.map(f => {
+    const ext  = path.extname(f.originalname).toLowerCase();
+    const dest = ext ? f.path + ext : f.path;
+    if (ext) fs.renameSync(f.path, dest);
+    return dest;
+  });
+
+  const filesManifest = path.join(__dirname, 'uploads', `files_${jobId}.json`);
+  fs.writeFileSync(filesManifest, JSON.stringify(
+    req.files.map((f, i) => ({ path: renamedPaths[i], name: f.originalname }))
+  ));
+
+  const firstName   = req.files[0].originalname;
+  const extra       = req.files.length - 1;
+  const displayName = extra === 0
+    ? firstName
+    : `${firstName} + ${extra} outro${extra > 1 ? 's' : ''}`;
 
   const py = spawn('python', [
     workerPath, 'upload',
-    '--provider', aiType,
-    '--key',      apiKey,
-    '--file',     filePath,
+    '--provider',   aiType,
+    '--key',        apiKey,
+    '--files-file', filesManifest,
   ]);
 
   let buf = '';
@@ -114,7 +127,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
       } else if (t.startsWith('RESULT:')) {
         try {
           const r = JSON.parse(t.slice('RESULT:'.length));
-          r.filename = originalName;
+          r.filename = displayName;
           saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
           const job = jobs.get(jobId);
           job.result = r;
@@ -142,7 +155,8 @@ app.post('/upload', upload.single('file'), (req, res) => {
   });
 
   py.on('close', (code) => {
-    fs.unlink(filePath, () => {});
+    renamedPaths.forEach(p => fs.unlink(p, () => {}));
+    fs.unlink(filesManifest, () => {});
     const job = jobs.get(jobId);
     if (job && job.status === 'running') {
       job.status = 'error';
