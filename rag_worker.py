@@ -74,6 +74,22 @@ def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
                     lines.append(" | ".join(cells))
         return "\n".join(lines).encode("utf-8"), path.stem + ".txt"
 
+    if ext == ".csv":
+        import csv
+        lines = []
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                with open(path, newline="", encoding=enc) as f:
+                    reader = csv.reader(f)
+                    for row in reader:
+                        cells = [str(c) for c in row if c is not None]
+                        if cells:
+                            lines.append(" | ".join(cells))
+                break
+            except UnicodeDecodeError:
+                continue
+        return "\n".join(lines).encode("utf-8"), path.stem + ".txt"
+
     error(f"Formato nao suportado: {ext}")
 
 

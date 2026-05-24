@@ -50,7 +50,7 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
-const ALLOWED_EXTS = ['.txt', '.md', '.pdf', '.xlsx', '.xls'];
+const ALLOWED_EXTS = ['.txt', '.md', '.pdf', '.xlsx', '.xls', '.csv'];
 
 function addFiles(fileList) {
   let added = 0;
