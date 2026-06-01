@@ -427,11 +427,50 @@ def _crawl_js(start: str, depth: int,
 # ─── Scrape URLs → RAG ────────────────────────────────────────
 
 def _extract_text(html: bytes, url: str) -> str:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, Tag
+
     soup = BeautifulSoup(html, "lxml")
+
+    # Remove tags estruturais de navegação/lixo
     for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
         tag.decompose()
-    title = (soup.title.string or url).strip()
+
+    # Remove elementos por classes/IDs de lixo comuns
+    _JUNK_KEYWORDS = [
+        "cookie", "banner", "breadcrumb", "sidebar", "popup", "modal",
+        "newsletter", "advertisement", "ads", "social", "share",
+        "comment", "related",
+    ]
+    for kw in _JUNK_KEYWORDS:
+        for el in soup.select(f'[class*="{kw}"], [id*="{kw}"]'):
+            el.decompose()
+
+    # Converte tabelas para Markdown antes de extrair texto
+    for table in soup.find_all("table"):
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            rows.append("| " + " | ".join(cells) + " |")
+        if rows:
+            # Insere separador após header (primeira linha)
+            col_count = len(rows[0].split("|")) - 2
+            separator = "| " + " | ".join(["---"] * col_count) + " |"
+            rows.insert(1, separator)
+        md_table = "\n".join(rows)
+        table.replace_with(soup.new_string(f"\n\n{md_table}\n\n"))
+
+    # Marca blocos de código com backticks
+    for pre in soup.find_all("pre"):
+        code_text = pre.get_text()
+        pre.replace_with(soup.new_string(f"\n```\n{code_text}\n```\n"))
+
+    for code in soup.find_all("code"):
+        if not code.find_parent("pre"):  # apenas code inline (pre já foi tratado)
+            code_text = code.get_text()
+            code.replace_with(soup.new_string(f"`{code_text}`"))
+
+    title = (soup.title.string if soup.title else None) or url
+    title = title.strip()
     body  = soup.get_text(separator="\n", strip=True)
     return f"## {title}\n\nURL: {url}\n\n{body}"
 
