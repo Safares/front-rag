@@ -419,8 +419,7 @@ def query_gemini(api_key: str, store_name: str, question: str) -> dict:
     text = response.text or ""
     # Extrair citations do texto do Gemini
     citations = []
-    import re as _re
-    match = _re.search(r'\[Fontes?:\s*([^\]]+)\]', text, _re.IGNORECASE)
+    match = re.search(r'\[Fontes?:\s*([^\]]+)\]', text, re.IGNORECASE)
     if match:
         raw = match.group(1)
         citations = [c.strip() for c in raw.split(',') if c.strip()]
