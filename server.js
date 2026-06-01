@@ -18,6 +18,20 @@ const RAGS_DIR = path.join(__dirname, 'rags');
 fs.mkdirSync(RAGS_DIR,                       { recursive: true });
 fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
 
+// GC: limpa arquivos temporários de jobs de extração que nunca foram confirmados (> 2h)
+setInterval(() => {
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  const now = Date.now();
+  for (const [id, job] of jobs.entries()) {
+    const jobAge = now - parseInt(id.slice(0, 8), 36);
+    if (jobAge > TWO_HOURS && job.result?.renamedPaths) {
+      job.result.renamedPaths.forEach(p => fs.unlink(p, () => {}));
+      if (job.result.filesManifest) fs.unlink(job.result.filesManifest, () => {});
+      jobs.delete(id);
+    }
+  }
+}, 60 * 60 * 1000); // roda a cada hora
+
 let db = null;
 if (process.env.DATABASE_URL) {
   const { Pool } = require('pg');
@@ -461,6 +475,7 @@ app.post('/confirm-upload', async (req, res) => {
   }
 
   const { aiType, apiKey, renamedPaths, filesManifest } = extractJob.result;
+  jobs.delete(extractJobId); // libera memória e remove apiKey do Map
 
   const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
   const emitter = new EventEmitter();

@@ -161,6 +161,7 @@ function showPreviewPanel(previews) {
     const textarea = document.createElement('textarea');
     textarea.className = 'preview-textarea';
     textarea.dataset.name = p.name;
+    textarea.dataset.original = p.preview;
     textarea.rows = 6;
     textarea.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:8px;padding:10px;font-family:monospace;font-size:0.8rem;resize:vertical';
     textarea.value = p.preview;
@@ -186,10 +187,9 @@ confirmBtn.addEventListener('click', async () => {
   progressLog.classList.remove('hidden');
   appendLog('Iniciando indexação...');
 
-  const edits = [...previewList.querySelectorAll('.preview-textarea')].map(ta => ({
-    name: ta.dataset.name,
-    text: ta.value,
-  }));
+  const edits = [...previewList.querySelectorAll('.preview-textarea')]
+    .filter(ta => ta.value !== ta.dataset.original)
+    .map(ta => ({ name: ta.dataset.name, text: ta.value }));
 
   try {
     const res  = await fetch('/confirm-upload', {
