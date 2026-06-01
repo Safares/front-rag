@@ -53,6 +53,16 @@ if (process.env.DATABASE_URL) {
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS urls TEXT`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS schedule TEXT DEFAULT 'never'`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS scrape_ai_key TEXT`).catch(() => {});
+  db.query(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id         SERIAL PRIMARY KEY,
+      store_id   TEXT        NOT NULL,
+      question   TEXT,
+      answer     TEXT,
+      rating     TEXT        NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `).catch(e => console.error('Erro ao criar tabela feedback:', e.message));
   console.log('Banco PostgreSQL conectado.');
 } else {
   console.log('DATABASE_URL ausente — usando arquivos JSON locais.');
@@ -958,6 +968,59 @@ app.post('/api/v1/query', async (req, res) => {
     }
     res.status(500).json({ error: 'Resposta inesperada do worker.' });
   });
+});
+
+// ─── POST /feedback ───────────────────────────────────────────
+app.post('/feedback', async (req, res) => {
+  const { store_id, question, answer, rating } = req.body || {};
+  if (!store_id || !rating || !['up', 'down'].includes(rating)) {
+    return res.status(400).json({ error: 'store_id e rating (up|down) são obrigatórios.' });
+  }
+  try {
+    if (db) {
+      await db.query(
+        'INSERT INTO feedback (store_id, question, answer, rating) VALUES ($1, $2, $3, $4)',
+        [store_id, question || '', answer || '', rating]
+      );
+    } else {
+      const feedbackFile = path.join(__dirname, 'rags', 'feedback.json');
+      let entries = [];
+      try { entries = JSON.parse(fs.readFileSync(feedbackFile, 'utf-8')); } catch {}
+      entries.push({ store_id, question: question || '', answer: answer || '', rating, timestamp: new Date().toISOString() });
+      fs.writeFileSync(feedbackFile, JSON.stringify(entries, null, 2));
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── GET /admin/feedback ──────────────────────────────────────
+app.get('/admin/feedback', async (req, res) => {
+  const adminToken = process.env.ADMIN_TOKEN;
+  const provided   = (req.headers['authorization'] || '').replace('Bearer ', '').trim();
+  if (!adminToken || provided !== adminToken) {
+    return res.status(401).json({ error: 'Não autorizado.' });
+  }
+  try {
+    if (db) {
+      const { rows } = await db.query(
+        `SELECT store_id, question, answer, rating, created_at
+         FROM feedback WHERE rating = 'down'
+         ORDER BY question, created_at DESC`
+      );
+      return res.json(rows);
+    }
+    const feedbackFile = path.join(__dirname, 'rags', 'feedback.json');
+    let entries = [];
+    try { entries = JSON.parse(fs.readFileSync(feedbackFile, 'utf-8')); } catch {}
+    const negatives = entries
+      .filter(e => e.rating === 'down')
+      .sort((a, b) => a.question.localeCompare(b.question));
+    res.json(negatives);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;

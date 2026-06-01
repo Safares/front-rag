@@ -30,6 +30,7 @@ const copyBtn       = document.getElementById('copy-btn');
 let selectedFiles = [];
 let session = { apiKey: '', aiType: '', storeId: '', storeIds: null };
 let extractJobId = null;
+let lastQuestion  = '';
 let selectedRags = [];  // array of {store_id, provider, filename}
 
 // ─── Abas ─────────────────────────────────────────────────────
@@ -613,6 +614,7 @@ async function sendQuestion() {
   if (!q || (!session.storeId && !session.storeIds?.length)) return;
   questionInput.value = '';
   sendBtn.disabled = true;
+  lastQuestion = q;
   addMessage(q, 'user');
   // Only persist history for single-RAG sessions
   if (session.storeId) appendToHistory(session.storeId, 'user', q);
@@ -656,7 +658,11 @@ async function sendQuestion() {
 function addMessage(text, role, citations = []) {
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.textContent = text;
+
+  const textEl = document.createElement('span');
+  textEl.className = 'msg-text';
+  textEl.textContent = text;
+  div.appendChild(textEl);
 
   if (citations && citations.length > 0) {
     const citDiv = document.createElement('div');
@@ -670,9 +676,34 @@ function addMessage(text, role, citations = []) {
     div.appendChild(citDiv);
   }
 
+  if (role === 'assistant') {
+    const fbDiv = document.createElement('div');
+    fbDiv.className = 'feedback-btns';
+    ['up', 'down'].forEach(rating => {
+      const btn = document.createElement('button');
+      btn.className = 'feedback-btn';
+      btn.dataset.rating = rating;
+      btn.textContent = rating === 'up' ? '👍' : '👎';
+      btn.addEventListener('click', () => sendFeedback(rating, div, textEl.textContent));
+      fbDiv.appendChild(btn);
+    });
+    div.appendChild(fbDiv);
+  }
+
   chatBox.appendChild(div);
   chatBox.scrollTop = chatBox.scrollHeight;
   return div;
+}
+
+function sendFeedback(rating, msgEl, answerText) {
+  const storeId = session.storeId || session.storeIds?.[0]?.store_id || '';
+  fetch('/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ store_id: storeId, question: lastQuestion, answer: answerText, rating }),
+  }).catch(() => {});
+  msgEl.querySelectorAll('.feedback-btn').forEach(b => { b.disabled = true; });
+  msgEl.querySelector(`.feedback-btn[data-rating="${rating}"]`)?.classList.add('feedback-btn--chosen');
 }
 
 // ─── Dashboard de RAGs ────────────────────────────────────────

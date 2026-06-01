@@ -567,3 +567,24 @@ header p { color: #888; margin-top: 8px; }
   cursor: pointer;
   flex-shrink: 0;
 }
+
+.feedback-btns {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.feedback-btn {
+  background: none;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  opacity: 0.6;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+
+.feedback-btn:hover:not(:disabled) { opacity: 1; border-color: #7c3aed; }
+.feedback-btn:disabled { cursor: default; }
+.feedback-btn--chosen { opacity: 1; border-color: #7c3aed; background: rgba(124, 58, 237, 0.15); }
