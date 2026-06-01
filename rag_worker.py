@@ -425,6 +425,13 @@ def _crawl_js(start: str, depth: int,
 
 # ─── Scrape URLs → RAG ────────────────────────────────────────
 
+_JUNK_KEYWORDS = [
+    "cookie", "banner", "breadcrumb", "sidebar", "popup", "modal",
+    "newsletter", "advertisement", "ads", "social", "share",
+    "comment", "related",
+]
+
+
 def _extract_text(html: bytes, url: str) -> str:
     from bs4 import BeautifulSoup
 
@@ -435,11 +442,6 @@ def _extract_text(html: bytes, url: str) -> str:
         tag.decompose()
 
     # Remove elementos por classes/IDs de lixo comuns
-    _JUNK_KEYWORDS = [
-        "cookie", "banner", "breadcrumb", "sidebar", "popup", "modal",
-        "newsletter", "advertisement", "ads", "social", "share",
-        "comment", "related",
-    ]
     for kw in _JUNK_KEYWORDS:
         for el in soup.select(f'[class*="{kw}"], [id*="{kw}"]'):
             el.decompose()
@@ -452,15 +454,18 @@ def _extract_text(html: bytes, url: str) -> str:
             rows.append("| " + " | ".join(cells) + " |")
         if rows:
             # Insere separador após header (primeira linha)
-            col_count = len(rows[0].split("|")) - 2
+            first_row = table.find("tr")
+            col_count = len(first_row.find_all(["td", "th"])) if first_row else 0
             separator = "| " + " | ".join(["---"] * col_count) + " |"
             rows.insert(1, separator)
-        md_table = "\n".join(rows)
-        table.replace_with(soup.new_string(f"\n\n{md_table}\n\n"))
+            md_table = "\n".join(rows)
+            table.replace_with(soup.new_string(f"\n\n{md_table}\n\n"))
 
     # Marca blocos de código com backticks
     for pre in soup.find_all("pre"):
         code_text = pre.get_text()
+        if not code_text.strip():
+            continue
         pre.replace_with(soup.new_string(f"\n```\n{code_text}\n```\n"))
 
     for code in soup.find_all("code"):
