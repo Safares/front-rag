@@ -262,8 +262,7 @@ def upload_gemini(api_key: str, file_entries: list) -> dict:
 
             chunk_ok = False
             for n, chunk in enumerate(chunks, 1):
-                chunk_name = f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
-                safe_name = _ascii_filename(chunk_name)
+                chunk_name = _ascii_filename(f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name)
                 chunk_bytes = chunk.encode("utf-8")
                 progress(f"[{i}/{total}] Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
                 tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
@@ -427,7 +426,7 @@ def _crawl_js(start: str, depth: int,
 # ─── Scrape URLs → RAG ────────────────────────────────────────
 
 def _extract_text(html: bytes, url: str) -> str:
-    from bs4 import BeautifulSoup, Tag
+    from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(html, "lxml")
 
