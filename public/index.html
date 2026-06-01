@@ -132,7 +132,10 @@
 
     <!-- CHAT -->
     <section class="card hidden" id="chat-panel">
-      <h2>Chat com o documento</h2>
+      <div class="chat-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">Chat com o documento</h2>
+        <button class="btn-text" id="clear-history-btn" title="Limpar conversa">Limpar</button>
+      </div>
       <div class="chat-box" id="chat-box"></div>
       <div class="chat-input-row">
         <input type="text" id="question-input" placeholder="Faça uma pergunta sobre o documento..." />

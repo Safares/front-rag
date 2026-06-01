@@ -358,8 +358,13 @@ function showResult(r) {
   session = { apiKey: apiKeyInput.value.trim(), aiType: r.provider, storeId: r.store_id };
 
   chatPanel.classList.remove('hidden');
-  chatBox.innerHTML = '';
-  addMessage(`RAG pronto! Pode fazer perguntas sobre "${r.filename}".`, 'assistant');
+  const existing = loadHistory(r.store_id);
+  if (existing.length > 0) {
+    renderHistory(r.store_id);
+  } else {
+    addMessage(`RAG pronto! Pode fazer perguntas sobre "${r.filename}".`, 'assistant');
+    appendToHistory(r.store_id, 'assistant', `RAG pronto! Pode fazer perguntas sobre "${r.filename}".`);
+  }
   chatPanel.scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -388,7 +393,51 @@ function showStatus(msg, type) {
 }
 function hideStatus() { uploadStatus.classList.add('hidden'); }
 
+// ─── Histórico localStorage ───────────────────────────────────
+const CHAT_HISTORY_LIMIT = 50;
+
+function historyKey(storeId) {
+  return `chat_${storeId}`;
+}
+
+function loadHistory(storeId) {
+  try {
+    return JSON.parse(localStorage.getItem(historyKey(storeId)) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(storeId, messages) {
+  const trimmed = messages.slice(-CHAT_HISTORY_LIMIT);
+  localStorage.setItem(historyKey(storeId), JSON.stringify(trimmed));
+}
+
+function appendToHistory(storeId, role, text, citations = []) {
+  const messages = loadHistory(storeId);
+  messages.push({ role, text, citations });
+  saveHistory(storeId, messages);
+}
+
+function renderHistory(storeId) {
+  chatBox.innerHTML = '';
+  const messages = loadHistory(storeId);
+  messages.forEach(m => addMessage(m.text, m.role, m.citations || []));
+}
+
+function clearHistory(storeId) {
+  localStorage.removeItem(historyKey(storeId));
+}
+
 // ─── Chat ─────────────────────────────────────────────────────
+const clearHistoryBtn = document.getElementById('clear-history-btn');
+clearHistoryBtn.addEventListener('click', () => {
+  if (!session.storeId) return;
+  clearHistory(session.storeId);
+  chatBox.innerHTML = '';
+  addMessage('Conversa limpa. Faça uma nova pergunta.', 'assistant');
+});
+
 sendBtn.addEventListener('click', sendQuestion);
 questionInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) sendQuestion(); });
 
@@ -398,6 +447,7 @@ async function sendQuestion() {
   questionInput.value = '';
   sendBtn.disabled = true;
   addMessage(q, 'user');
+  appendToHistory(session.storeId, 'user', q);
   const thinking = addMessage('Pensando...', 'thinking');
 
   try {
@@ -408,14 +458,15 @@ async function sendQuestion() {
     });
     const data = await res.json();
     thinking.remove();
-    addMessage(
-      data.error ? 'Erro: ' + data.error : (data.answer || data.error),
-      'assistant',
-      data.error ? [] : (data.citations || [])
-    );
+    const answerText = data.error ? 'Erro: ' + data.error : (data.answer || '');
+    const answerCitations = data.error ? [] : (data.citations || []);
+    addMessage(answerText, 'assistant', answerCitations);
+    appendToHistory(session.storeId, 'assistant', answerText, answerCitations);
   } catch (e) {
     thinking.remove();
-    addMessage('Erro: ' + e.message, 'assistant');
+    const errText = 'Erro: ' + e.message;
+    addMessage(errText, 'assistant');
+    appendToHistory(session.storeId, 'assistant', errText);
   }
 
   sendBtn.disabled = false;
