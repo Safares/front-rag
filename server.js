@@ -4,6 +4,7 @@ const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
+const crypto  = require('crypto');
 const { spawn }        = require('child_process');
 const { EventEmitter } = require('events');
 
@@ -47,28 +48,32 @@ if (process.env.DATABASE_URL) {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `).catch(e => console.error('Erro ao criar tabela rags:', e.message));
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS api_key TEXT`)
+    .catch(() => {}); // ignore if column already exists
   console.log('Banco PostgreSQL conectado.');
 } else {
   console.log('DATABASE_URL ausente — usando arquivos JSON locais.');
 }
 
 async function saveRag(data) {
+  const apiKey = data.api_key || crypto.randomUUID();
   if (db) {
     await db.query(
-      'INSERT INTO rags (store_id, store_name, provider, filename, file_count) VALUES ($1, $2, $3, $4, $5)',
-      [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0]
+      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key) VALUES ($1, $2, $3, $4, $5, $6)',
+      [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0, apiKey]
     );
   } else {
     const stem    = path.parse(data.filename || 'rag').name;
     const ragFile = path.join(RAGS_DIR, `${stem}.json`);
-    fs.writeFileSync(ragFile, JSON.stringify({ ...data, createdAt: new Date().toISOString() }, null, 2));
+    fs.writeFileSync(ragFile, JSON.stringify({ ...data, api_key: apiKey, createdAt: new Date().toISOString() }, null, 2));
   }
+  return apiKey;
 }
 
 async function listRags() {
   if (db) {
     const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
+      'SELECT store_id, store_name, provider, filename, file_count, api_key, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
     );
     return rows;
   }
@@ -79,6 +84,40 @@ async function listRags() {
       .filter(Boolean)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   } catch { return []; }
+}
+
+async function findRagByApiKey(apiKey) {
+  if (db) {
+    const { rows } = await db.query(
+      'SELECT store_id, store_name, provider, filename, file_count, api_key, created_at AS "createdAt" FROM rags WHERE api_key = $1',
+      [apiKey]
+    );
+    return rows[0] || null;
+  }
+  const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+  for (const f of files) {
+    try {
+      const rag = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+      if (rag.api_key === apiKey) return rag;
+    } catch {}
+  }
+  return null;
+}
+
+// ─── Per-api-key rate limiting for public API ─────────────────
+const apiKeyHitMap = new Map(); // api_key -> { count, windowStart }
+function checkRateLimit(apiKey) {
+  const now = Date.now();
+  const WINDOW_MS = 60 * 1000;
+  const MAX_HITS  = 60;
+  const entry = apiKeyHitMap.get(apiKey) || { count: 0, windowStart: now };
+  if (now - entry.windowStart > WINDOW_MS) {
+    entry.count = 0;
+    entry.windowStart = now;
+  }
+  entry.count++;
+  apiKeyHitMap.set(apiKey, entry);
+  return entry.count <= MAX_HITS;
 }
 
 // ─── Job store (in-memory) ────────────────────────────────────
@@ -144,11 +183,19 @@ app.post('/upload', upload.array('files', 20), (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
-          saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
-          const job = jobs.get(jobId);
-          job.result = r;
-          job.status = 'done';
-          emitter.emit('done', r);
+          saveRag(r).then(apiKey => {
+            r.api_key = apiKey;
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          }).catch(e => {
+            console.error('Erro ao salvar RAG:', e.message);
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          });
         } catch (e) {
           const job = jobs.get(jobId);
           job.status = 'error';
@@ -382,11 +429,19 @@ app.post('/scrape', (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = name;
           r.file_count = r.files_uploaded?.length || 0;
-          saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
-          const job = jobs.get(jobId);
-          job.result = r;
-          job.status = 'done';
-          emitter.emit('done', r);
+          saveRag(r).then(apiKey => {
+            r.api_key = apiKey;
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          }).catch(e => {
+            console.error('Erro ao salvar RAG:', e.message);
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          });
         } catch (e) {
           const job = jobs.get(jobId);
           job.status = 'error';
@@ -447,7 +502,7 @@ app.get('/rags/:storeId', async (req, res) => {
     const { storeId } = req.params;
     if (db) {
       const { rows } = await db.query(
-        'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags WHERE store_id = $1',
+        'SELECT store_id, store_name, provider, filename, file_count, api_key, created_at AS "createdAt" FROM rags WHERE store_id = $1',
         [storeId]
       );
       if (!rows.length) return res.status(404).json({ error: 'RAG não encontrado.' });
@@ -688,11 +743,19 @@ app.post('/confirm-upload', async (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
-          saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
-          const job = jobs.get(jobId);
-          job.result = r;
-          job.status = 'done';
-          emitter.emit('done', r);
+          saveRag(r).then(apiKey => {
+            r.api_key = apiKey;
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          }).catch(e => {
+            console.error('Erro ao salvar RAG:', e.message);
+            const job = jobs.get(jobId);
+            job.result = r;
+            job.status = 'done';
+            emitter.emit('done', r);
+          });
         } catch (e) {
           const job = jobs.get(jobId);
           job.status = 'error';
@@ -721,6 +784,87 @@ app.post('/confirm-upload', async (req, res) => {
       job.error  = `Processo encerrado com código ${code}.`;
       emitter.emit('error', job.error);
     }
+  });
+});
+
+// ─── GET /api/docs ────────────────────────────────────────────
+app.get('/api/docs', (_req, res) => {
+  res.type('application/json');
+  res.json({
+    openapi: '3.0.0',
+    info: { title: 'FRONT RAG API', version: '1.0.0', description: 'Query RAG bases programmatically.' },
+    paths: {
+      '/api/v1/query': {
+        post: {
+          summary: 'Query a RAG base',
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['question', 'ai_key'],
+                  properties: {
+                    question: { type: 'string', example: 'O que é X?' },
+                    ai_key:   { type: 'string', example: 'sk-...' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: { description: 'Answer', content: { 'application/json': { schema: { type: 'object', properties: { answer: { type: 'string' }, citations: { type: 'array', items: { type: 'string' } } } } } } },
+            401: { description: 'Invalid or missing API key' },
+            429: { description: 'Rate limit exceeded' },
+          },
+        },
+      },
+    },
+    components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } },
+  });
+});
+
+// ─── POST /api/v1/query ───────────────────────────────────────
+app.post('/api/v1/query', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const apiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!apiKey) return res.status(401).json({ error: 'Authorization header obrigatório: Bearer {api_key}' });
+
+  if (!checkRateLimit(apiKey)) {
+    return res.status(429).json({ error: 'Rate limit excedido. Máximo: 60 requisições/minuto.' });
+  }
+
+  const { question, ai_key: aiKey } = req.body || {};
+  if (!question?.trim() || !aiKey) {
+    return res.status(400).json({ error: 'Campos obrigatórios: question, ai_key' });
+  }
+
+  let rag;
+  try { rag = await findRagByApiKey(apiKey); } catch { return res.status(500).json({ error: 'Erro interno.' }); }
+  if (!rag) return res.status(401).json({ error: 'API key inválida.' });
+
+  const workerPath = path.join(__dirname, 'rag_worker.py');
+  const py = spawn('python', [
+    workerPath, 'query',
+    '--provider', rag.provider,
+    '--key',      aiKey,
+    '--store',    rag.store_id,
+    '--question', question,
+  ]);
+
+  let out = '';
+  py.stdout.on('data', (d) => { out += d.toString(); });
+  py.on('close', () => {
+    for (const line of out.split('\n')) {
+      if (line.startsWith('RESULT:')) {
+        try { return res.json(JSON.parse(line.slice('RESULT:'.length))); } catch {}
+      }
+      if (line.startsWith('ERROR:')) {
+        return res.status(500).json({ error: line.slice('ERROR:'.length) });
+      }
+    }
+    res.status(500).json({ error: 'Resposta inesperada do worker.' });
   });
 });
 

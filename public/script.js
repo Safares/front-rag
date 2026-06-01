@@ -352,6 +352,8 @@ function showResult(r) {
   document.getElementById('r-provider').textContent = r.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = r.store_id;
   document.getElementById('r-saved').textContent    = `rags/${(r.filename || 'rag').replace(/\.[^.]+$/, '')}.json`;
+  const apiKeyEl = document.getElementById('r-api-key');
+  if (apiKeyEl) apiKeyEl.textContent = r.api_key || '—';
 
   resultPanel.classList.remove('hidden');
   resultPanel.scrollIntoView({ behavior: 'smooth' });
@@ -373,6 +375,16 @@ copyBtn.addEventListener('click', () => {
   navigator.clipboard.writeText(document.getElementById('r-store-id').textContent).then(() => {
     copyBtn.textContent = 'Copiado!';
     setTimeout(() => { copyBtn.textContent = 'Copiar Store ID'; }, 2000);
+  });
+});
+
+const copyApiKeyBtn = document.getElementById('copy-api-key-btn');
+copyApiKeyBtn.addEventListener('click', () => {
+  const key = document.getElementById('r-api-key').textContent;
+  if (!key || key === '—') return;
+  navigator.clipboard.writeText(key).then(() => {
+    copyApiKeyBtn.textContent = 'Copiado!';
+    setTimeout(() => { copyApiKeyBtn.textContent = 'Copiar API Key'; }, 2000);
   });
 });
 
@@ -844,6 +856,8 @@ function selectRag(rag) {
   document.getElementById('r-provider').textContent = rag.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = rag.store_id;
   document.getElementById('r-saved').textContent = `rags/${(rag.filename || 'rag').replace(/\.[^.]+$/, '')}.json`;
+  const apiKeyEl = document.getElementById('r-api-key');
+  if (apiKeyEl) apiKeyEl.textContent = rag.api_key || '—';
   resultPanel.classList.remove('hidden');
 
   chatPanel.classList.remove('hidden');
