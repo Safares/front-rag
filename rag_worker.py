@@ -35,6 +35,73 @@ def error(msg: str) -> None:
 
 # ─── Leitura de arquivo ───────────────────────────────────────
 
+def _extract_pdf_text(path: Path) -> str:
+    """Extrai texto de PDF. Usa OCR como fallback para PDFs escaneados."""
+    parts = []
+
+    # Tentativa 1: pdfplumber
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    parts.append(t)
+    except ImportError:
+        pass
+    except Exception:
+        parts = []
+
+    # Tentativa 2: pypdf (fallback se pdfplumber falhou ou não está instalado)
+    if not parts:
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(path))
+            for page in reader.pages:
+                t = page.extract_text() or ""
+                if t.strip():
+                    parts.append(t)
+        except ImportError:
+            pass
+        except Exception:
+            parts = []
+
+    combined = "\n\n".join(parts)
+
+    # Verifica se o texto extraído é significativo
+    # (< 50 chars por página em média = provavelmente PDF escaneado)
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            num_pages = len(pdf.pages)
+    except Exception:
+        num_pages = max(1, len(parts))
+
+    is_scanned = len(combined.strip()) < 50 * max(num_pages, 1)
+
+    if is_scanned:
+        progress(f"PDF escaneado detectado em {path.name}, usando OCR (pode demorar)...")
+        try:
+            from pdf2image import convert_from_path
+            import pytesseract
+            images = convert_from_path(str(path), dpi=200)
+            ocr_parts = []
+            for i, img in enumerate(images, 1):
+                progress(f"  OCR página {i}/{len(images)}...")
+                text = pytesseract.image_to_string(img, lang="por+eng")
+                if text.strip():
+                    ocr_parts.append(text)
+            if ocr_parts:
+                return "\n\n".join(ocr_parts)
+            progress(f"OCR não produziu texto para {path.name}.")
+        except ImportError:
+            progress("pytesseract/pdf2image não instalados. Instale com: pip install pytesseract pdf2image")
+        except Exception as e:
+            progress(f"Erro no OCR: {e}")
+
+    return combined if combined else f"[PDF sem texto extraível: {path.name}]"
+
+
 def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
     """Retorna (conteudo_bytes, nome_para_upload)."""
     ext = path.suffix.lower()
@@ -43,24 +110,8 @@ def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
         return path.read_bytes(), path.name
 
     if ext == ".pdf":
-        try:
-            import pdfplumber
-            parts = []
-            with pdfplumber.open(path) as pdf:
-                for page in pdf.pages:
-                    t = page.extract_text()
-                    if t:
-                        parts.append(t)
-            return "\n\n".join(parts).encode("utf-8"), path.stem + ".txt"
-        except ImportError:
-            pass
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(str(path))
-            text = "\n\n".join(p.extract_text() or "" for p in reader.pages)
-            return text.encode("utf-8"), path.stem + ".txt"
-        except ImportError:
-            error("Instale pdfplumber ou pypdf para processar PDFs: pip install pdfplumber")
+        text = _extract_pdf_text(path)
+        return text.encode("utf-8"), path.stem + ".txt"
 
     if ext in (".xlsx", ".xls"):
         import openpyxl

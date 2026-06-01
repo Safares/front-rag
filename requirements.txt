@@ -6,3 +6,5 @@ requests
 beautifulsoup4
 lxml
 playwright
+pytesseract
+pdf2image
