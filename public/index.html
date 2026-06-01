@@ -83,6 +83,14 @@
             <small>Para sites dinâmicos (ex: Zoho Desk, Confluence, SPAs). Mais lento.</small>
           </span>
         </label>
+        <div class="depth-row" style="margin-top:12px">
+          <span class="depth-label">Atualização auto:</span>
+          <div class="depth-options">
+            <label class="depth-opt"><input type="radio" name="scrape_schedule" value="never" checked /> Nunca</label>
+            <label class="depth-opt"><input type="radio" name="scrape_schedule" value="daily" /> Diária</label>
+            <label class="depth-opt"><input type="radio" name="scrape_schedule" value="weekly" /> Semanal</label>
+          </div>
+        </div>
         <button class="btn-primary" id="scan-btn" disabled>Escanear páginas</button>
 
         <!-- LISTA DE CONFIRMAÇÃO -->

@@ -7,6 +7,7 @@ const fs      = require('fs');
 const crypto  = require('crypto');
 const { spawn }        = require('child_process');
 const { EventEmitter } = require('events');
+const cron             = require('node-cron');
 
 const app    = express();
 const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 100 * 1024 * 1024 } });
@@ -48,8 +49,10 @@ if (process.env.DATABASE_URL) {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `).catch(e => console.error('Erro ao criar tabela rags:', e.message));
-  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS api_key TEXT`)
-    .catch(() => {}); // ignore if column already exists
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS api_key TEXT`).catch(() => {});
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS urls TEXT`).catch(() => {});
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS schedule TEXT DEFAULT 'never'`).catch(() => {});
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS scrape_ai_key TEXT`).catch(() => {});
   console.log('Banco PostgreSQL conectado.');
 } else {
   console.log('DATABASE_URL ausente — usando arquivos JSON locais.');
@@ -59,8 +62,9 @@ async function saveRag(data) {
   const apiKey = data.api_key || crypto.randomUUID();
   if (db) {
     await db.query(
-      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key) VALUES ($1, $2, $3, $4, $5, $6)',
-      [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0, apiKey]
+      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key, urls, schedule, scrape_ai_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0, apiKey,
+       JSON.stringify(data.urls || []), data.schedule || 'never', data.scrape_ai_key || null]
     );
   } else {
     const stem    = path.parse(data.filename || 'rag').name;
@@ -73,7 +77,7 @@ async function saveRag(data) {
 async function listRags() {
   if (db) {
     const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
+      'SELECT store_id, store_name, provider, filename, file_count, schedule, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
     );
     return rows;
   }
@@ -82,13 +86,27 @@ async function listRags() {
     return files
       .map(f => {
         try {
-          const { api_key: _omit, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+          const { api_key: _k, scrape_ai_key: _s, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
           return rag;
         } catch { return null; }
       })
       .filter(Boolean)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   } catch { return []; }
+}
+
+async function listRagsWithSchedule() {
+  if (db) {
+    const { rows } = await db.query(
+      `SELECT store_id, store_name, provider, filename, api_key, scrape_ai_key, urls, schedule
+       FROM rags WHERE schedule != 'never' AND urls IS NOT NULL`
+    );
+    return rows.map(r => ({ ...r, urls: r.urls ? JSON.parse(r.urls) : [] }));
+  }
+  const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+  return files
+    .map(f => { try { return JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8')); } catch { return null; } })
+    .filter(r => r && r.schedule && r.schedule !== 'never' && r.urls?.length);
 }
 
 async function findRagByApiKey(apiKey) {
@@ -127,6 +145,61 @@ function checkRateLimit(apiKey) {
 
 // ─── Job store (in-memory) ────────────────────────────────────
 const jobs = new Map();
+
+// ─── Re-scraping automático ───────────────────────────────────
+const activeJobs = new Map(); // store_id → cron job instance
+
+function runReScrape(rag) {
+  if (!rag.urls?.length || !rag.scrape_ai_key) {
+    console.log(`[cron] Pulando ${rag.store_id}: sem AI key armazenada.`);
+    return;
+  }
+  console.log(`[cron] Re-scraping ${rag.store_id} (${rag.filename})...`);
+  const urlsFile = path.join(__dirname, 'uploads', `rescrape_${Date.now().toString(36)}.json`);
+  fs.writeFileSync(urlsFile, JSON.stringify(rag.urls));
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'scrape',
+    '--provider',  rag.provider,
+    '--key',       rag.scrape_ai_key,
+    '--urls-file', urlsFile,
+    '--name',      rag.filename || rag.store_id,
+  ]);
+
+  let buf = '';
+  py.stdout.on('data', (d) => {
+    buf += d.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (t.startsWith('PROGRESS:')) console.log(`[cron] ${t.slice('PROGRESS:'.length)}`);
+      else if (t.startsWith('RESULT:')) console.log(`[cron] Re-scrape concluída: ${rag.store_id}`);
+      else if (t.startsWith('ERROR:'))  console.error(`[cron] Erro: ${t.slice('ERROR:'.length)}`);
+    }
+  });
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) console.log(`[cron] ${m}`); });
+  py.on('close', () => fs.unlink(urlsFile, () => {}));
+}
+
+function scheduleCronForRag(rag) {
+  if (rag.schedule === 'daily')  return cron.schedule('0 3 * * *', () => runReScrape(rag));
+  if (rag.schedule === 'weekly') return cron.schedule('0 3 * * 1', () => runReScrape(rag));
+  return null;
+}
+
+async function initCronJobs() {
+  try {
+    const rags = await listRagsWithSchedule();
+    for (const rag of rags) {
+      const job = scheduleCronForRag(rag);
+      if (job) activeJobs.set(rag.store_id, job);
+    }
+    if (activeJobs.size > 0) console.log(`[cron] ${activeJobs.size} job(s) de re-scraping agendados.`);
+  } catch (e) {
+    console.error('[cron] Erro ao inicializar jobs:', e.message);
+  }
+}
 
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
@@ -396,7 +469,7 @@ app.post('/crawl', (req, res) => {
 
 // ─── POST /scrape — scrapa páginas confirmadas e cria RAG ─────
 app.post('/scrape', (req, res) => {
-  const { urls, api_key: apiKey, ai_type: aiType, name } = req.body || {};
+  const { urls, api_key: apiKey, ai_type: aiType, name, schedule = 'never' } = req.body || {};
   if (!urls?.length || !apiKey || !aiType || !name) {
     return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
   }
@@ -434,8 +507,15 @@ app.post('/scrape', (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = name;
           r.file_count = r.files_uploaded?.length || 0;
-          saveRag(r).then(apiKey => {
-            r.api_key = apiKey;
+          r.urls       = urls;
+          r.schedule   = schedule;
+          if (schedule !== 'never') r.scrape_ai_key = apiKey;
+          saveRag(r).then(ragApiKey => {
+            r.api_key = ragApiKey;
+            if (schedule !== 'never' && urls?.length) {
+              const job2 = scheduleCronForRag({ ...r, api_key: ragApiKey });
+              if (job2) activeJobs.set(r.store_id, job2);
+            }
             const job = jobs.get(jobId);
             job.result = r;
             job.status = 'done';
@@ -881,4 +961,7 @@ app.post('/api/v1/query', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`\n✅ Servidor rodando na porta ${PORT}\n`));
+app.listen(PORT, () => {
+  console.log(`\n✅ Servidor rodando na porta ${PORT}\n`);
+  initCronJobs();
+});

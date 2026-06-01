@@ -106,7 +106,8 @@ function checkFileReady() { uploadBtn.disabled = !(selectedFiles.length > 0 && a
 function checkUrlReady()  { scanBtn.disabled   = !(urlInput.value.trim() && apiKeyInput.value.trim()); }
 function getAiType()      { return document.querySelector('input[name="ai_type"]:checked').value; }
 function getDepth()  { return Number(document.querySelector('input[name="depth"]:checked').value); }
-function getUseJs()  { return document.getElementById('use-js').checked; }
+function getUseJs()      { return document.getElementById('use-js').checked; }
+function getScrapeSchedule() { return document.querySelector('input[name="scrape_schedule"]:checked')?.value || 'never'; }
 
 // ─── Criar RAG por arquivo (fase 1: extrair) ─────────────────
 uploadBtn.addEventListener('click', async () => {
@@ -312,6 +313,7 @@ scrapeBtn.addEventListener('click', async () => {
         api_key: apiKeyInput.value.trim(),
         ai_type: getAiType(),
         name,
+        schedule: getScrapeSchedule(),
       }),
     });
     const data = await res.json();
@@ -702,6 +704,7 @@ async function loadRags() {
         ? new Date(rag.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
         : '—';
       const fileCount = rag.file_count != null ? `${rag.file_count} arquivo${rag.file_count !== 1 ? 's' : ''}` : '—';
+      const scheduleLabel = rag.schedule === 'daily' ? ' · Atualização diária' : rag.schedule === 'weekly' ? ' · Atualização semanal' : '';
 
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
@@ -721,7 +724,7 @@ async function loadRags() {
 
       const metaEl = document.createElement('div');
       metaEl.className = 'rag-card-meta';
-      metaEl.textContent = `${providerLabel} · ${fileCount} · ${dateStr}`;
+      metaEl.textContent = `${providerLabel} · ${fileCount} · ${dateStr}${scheduleLabel}`;
 
       const useBtn = document.createElement('button');
       useBtn.className = 'btn-text';

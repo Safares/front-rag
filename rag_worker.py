@@ -1016,14 +1016,16 @@ def main():
                 provider = store_entry.get("provider", args.provider)
                 try:
                     try:
-                        r = await asyncio.to_thread(
-                            query_openai if provider == "openai" else query_gemini,
-                            args.key, sid, args.question
-                        )
+                        if provider == "openai":
+                            r = await asyncio.to_thread(query_openai, args.key, sid, args.question)
+                        else:
+                            r = await asyncio.to_thread(query_gemini, args.key, sid, args.question)
                     except AttributeError:
                         # Python < 3.9: asyncio.to_thread not available — run sequentially
-                        fn = query_openai if provider == "openai" else query_gemini
-                        r = fn(args.key, sid, args.question)
+                        if provider == "openai":
+                            r = query_openai(args.key, sid, args.question)
+                        else:
+                            r = query_gemini(args.key, sid, args.question)
                     return {"name": name, "answer": r["answer"], "citations": r.get("citations", [])}
                 except Exception as e:
                     return {"name": name, "answer": f"[Erro: {e}]", "citations": []}
