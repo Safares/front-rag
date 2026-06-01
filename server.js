@@ -73,14 +73,19 @@ async function saveRag(data) {
 async function listRags() {
   if (db) {
     const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, file_count, api_key, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
+      'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
     );
     return rows;
   }
   try {
     const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
     return files
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8')); } catch { return null; } })
+      .map(f => {
+        try {
+          const { api_key: _omit, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+          return rag;
+        } catch { return null; }
+      })
       .filter(Boolean)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   } catch { return []; }
@@ -502,7 +507,7 @@ app.get('/rags/:storeId', async (req, res) => {
     const { storeId } = req.params;
     if (db) {
       const { rows } = await db.query(
-        'SELECT store_id, store_name, provider, filename, file_count, api_key, created_at AS "createdAt" FROM rags WHERE store_id = $1',
+        'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags WHERE store_id = $1',
         [storeId]
       );
       if (!rows.length) return res.status(404).json({ error: 'RAG não encontrado.' });
@@ -511,7 +516,7 @@ app.get('/rags/:storeId', async (req, res) => {
     const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
     for (const f of files) {
       try {
-        const rag = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+        const { api_key: _omit, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
         if (rag.store_id === storeId) return res.json(rag);
       } catch {}
     }
@@ -838,6 +843,13 @@ app.post('/api/v1/query', async (req, res) => {
   const { question, ai_key: aiKey } = req.body || {};
   if (!question?.trim() || !aiKey) {
     return res.status(400).json({ error: 'Campos obrigatórios: question, ai_key' });
+  }
+  // Guard against argv flag injection (spawn is used, not exec, but argparse could misparse leading dashes)
+  if (typeof aiKey !== 'string' || aiKey.startsWith('-')) {
+    return res.status(400).json({ error: 'Formato de ai_key inválido.' });
+  }
+  if (question.trimStart().startsWith('--')) {
+    return res.status(400).json({ error: 'Formato de question inválido.' });
   }
 
   let rag;
