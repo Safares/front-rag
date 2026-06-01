@@ -370,5 +370,179 @@ app.get('/rags', async (_req, res) => {
   try { res.json(await listRags()); } catch { res.json([]); }
 });
 
+// ─── POST /extract ────────────────────────────────────────────
+app.post('/extract', upload.array('files', 20), (req, res) => {
+  const { api_key: apiKey, ai_type: aiType } = req.body;
+  if (!req.files?.length || !apiKey || !aiType) {
+    return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
+  }
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+
+  res.json({ jobId, aiType, apiKey: apiKey.substring(0, 8) + '...' });
+
+  const workerPath = path.join(__dirname, 'rag_worker.py');
+  const renamedPaths = req.files.map(f => {
+    const ext  = path.extname(f.originalname).toLowerCase();
+    const dest = ext ? f.path + ext : f.path;
+    if (ext) fs.renameSync(f.path, dest);
+    return dest;
+  });
+
+  const filesManifest = path.join(__dirname, 'uploads', `files_${jobId}.json`);
+  fs.writeFileSync(filesManifest, JSON.stringify(
+    req.files.map((f, i) => ({ path: renamedPaths[i], name: f.originalname }))
+  ));
+
+  const py = spawn('python', [workerPath, 'extract', '--files-file', filesManifest]);
+  let buf = '';
+
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) {
+        emitter.emit('progress', t.slice('PROGRESS:'.length));
+      } else if (t.startsWith('RESULT:')) {
+        try {
+          const r = JSON.parse(t.slice('RESULT:'.length));
+          // Store metadata for confirm-upload
+          r.renamedPaths  = renamedPaths;
+          r.aiType        = aiType;
+          r.apiKey        = apiKey;
+          r.filesManifest = filesManifest;
+          const job = jobs.get(jobId);
+          job.result = r;
+          job.status = 'done';
+          emitter.emit('done', { previews: r.previews.map(p => ({ name: p.name, preview: p.text.slice(0, 500) })), jobId });
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error';
+          job.error  = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error';
+        job.error  = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error';
+      job.error  = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
+});
+
+// ─── POST /confirm-upload ─────────────────────────────────────
+app.post('/confirm-upload', async (req, res) => {
+  const { extractJobId, edits, name } = req.body || {};
+  if (!extractJobId || !edits?.length) {
+    return res.status(400).json({ error: 'extractJobId e edits são obrigatórios.' });
+  }
+
+  const extractJob = jobs.get(extractJobId);
+  if (!extractJob?.result) {
+    return res.status(404).json({ error: 'Job de extração não encontrado.' });
+  }
+
+  const { aiType, apiKey, renamedPaths, filesManifest } = extractJob.result;
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+
+  res.json({ jobId });
+
+  // Merge: se o usuário editou, usa o texto editado; senão usa o original
+  const originalPreviews = extractJob.result.previews;
+  const editMap = Object.fromEntries(edits.map(e => [e.name, e.text]));
+  const texts = originalPreviews.map(p => ({
+    name: p.name,
+    text: editMap[p.name] !== undefined ? editMap[p.name] : p.text,
+  }));
+
+  const displayName = texts.length === 1
+    ? texts[0].name
+    : `${texts[0].name} + ${texts.length - 1} outro${texts.length > 2 ? 's' : ''}`;
+
+  const textsFile = path.join(__dirname, 'uploads', `texts_${jobId}.json`);
+  fs.writeFileSync(textsFile, JSON.stringify(texts));
+
+  const ragName = name || (texts[0]?.name || 'rag').replace(/\.[^.]+$/, '');
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'upload-text',
+    '--provider',   aiType,
+    '--key',        apiKey,
+    '--texts-file', textsFile,
+    '--name',       ragName,
+  ]);
+
+  let buf = '';
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) {
+        emitter.emit('progress', t.slice('PROGRESS:'.length));
+      } else if (t.startsWith('RESULT:')) {
+        try {
+          const r = JSON.parse(t.slice('RESULT:'.length));
+          r.filename = displayName;
+          saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
+          const job = jobs.get(jobId);
+          job.result = r;
+          job.status = 'done';
+          emitter.emit('done', r);
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error';
+          job.error  = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error';
+        job.error  = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    // Cleanup
+    renamedPaths?.forEach(p => fs.unlink(p, () => {}));
+    if (filesManifest) fs.unlink(filesManifest, () => {});
+    fs.unlink(textsFile, () => {});
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error';
+      job.error  = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`\n✅ Servidor rodando na porta ${PORT}\n`));

@@ -13,8 +13,12 @@ const pagesCount    = document.getElementById('pages-count');
 const selectAllBtn  = document.getElementById('select-all-btn');
 const deselectAllBtn= document.getElementById('deselect-all-btn');
 const scrapeBtn     = document.getElementById('scrape-btn');
-const progressLog   = document.getElementById('progress-log');
-const uploadStatus  = document.getElementById('upload-status');
+const progressLog      = document.getElementById('progress-log');
+const previewPanel     = document.getElementById('preview-panel');
+const previewList      = document.getElementById('preview-list');
+const confirmBtn       = document.getElementById('confirm-btn');
+const cancelPreviewBtn = document.getElementById('cancel-preview-btn');
+const uploadStatus     = document.getElementById('upload-status');
 const resultPanel   = document.getElementById('result-panel');
 const chatPanel     = document.getElementById('chat-panel');
 const chatBox       = document.getElementById('chat-box');
@@ -25,6 +29,7 @@ const copyBtn       = document.getElementById('copy-btn');
 
 let selectedFiles = [];
 let session = { apiKey: '', aiType: '', storeId: '' };
+let extractJobId = null;
 
 // ─── Abas ─────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -102,13 +107,14 @@ function getAiType()      { return document.querySelector('input[name="ai_type"]
 function getDepth()  { return Number(document.querySelector('input[name="depth"]:checked').value); }
 function getUseJs()  { return document.getElementById('use-js').checked; }
 
-// ─── Criar RAG por arquivo ────────────────────────────────────
+// ─── Criar RAG por arquivo (fase 1: extrair) ─────────────────
 uploadBtn.addEventListener('click', async () => {
   if (!selectedFiles.length || !apiKeyInput.value.trim()) return;
   uploadBtn.disabled = true;
   hideStatus(); clearLog();
   progressLog.classList.remove('hidden');
-  appendLog(`Enviando ${selectedFiles.length} arquivo${selectedFiles.length > 1 ? 's' : ''}...`);
+  previewPanel.classList.add('hidden');
+  appendLog(`Extraindo texto de ${selectedFiles.length} arquivo${selectedFiles.length > 1 ? 's' : ''}...`);
 
   const formData = new FormData();
   for (const file of selectedFiles) formData.append('files', file);
@@ -116,14 +122,95 @@ uploadBtn.addEventListener('click', async () => {
   formData.append('ai_type', getAiType());
 
   try {
-    const res  = await fetch('/upload', { method: 'POST', body: formData });
+    const res  = await fetch('/extract', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.error) { showStatus(data.error, 'error'); uploadBtn.disabled = false; return; }
-    listenProgress(data.jobId, () => { uploadBtn.disabled = false; });
+
+    const es = new EventSource(`/progress/${data.jobId}`);
+    es.addEventListener('progress', (e) => appendLog(JSON.parse(e.data).message));
+    es.addEventListener('done', (e) => {
+      es.close();
+      const { previews, jobId } = JSON.parse(e.data);
+      extractJobId = jobId;
+      showPreviewPanel(previews);
+      uploadBtn.disabled = false;
+    });
+    es.addEventListener('error', (e) => {
+      es.close();
+      let msg = 'Erro ao extrair.';
+      try { msg = JSON.parse(e.data).error; } catch {}
+      showStatus(msg, 'error');
+      uploadBtn.disabled = false;
+    });
   } catch (e) {
     showStatus('Erro de conexão: ' + e.message, 'error');
     uploadBtn.disabled = false;
   }
+});
+
+function showPreviewPanel(previews) {
+  previewList.innerHTML = '';
+  previews.forEach((p) => {
+    const item = document.createElement('div');
+    item.style.cssText = 'margin-bottom:16px';
+
+    const label = document.createElement('div');
+    label.style.cssText = 'font-weight:600;margin-bottom:6px;font-size:0.9rem';
+    label.textContent = p.name;
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'preview-textarea';
+    textarea.dataset.name = p.name;
+    textarea.rows = 6;
+    textarea.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:8px;padding:10px;font-family:monospace;font-size:0.8rem;resize:vertical';
+    textarea.value = p.preview;
+
+    const hint = document.createElement('small');
+    hint.style.opacity = '0.6';
+    hint.textContent = 'Exibindo até 500 caracteres extraídos. Edite se necessário.';
+
+    item.appendChild(label);
+    item.appendChild(textarea);
+    item.appendChild(hint);
+    previewList.appendChild(item);
+  });
+  previewPanel.classList.remove('hidden');
+  previewPanel.scrollIntoView({ behavior: 'smooth' });
+}
+
+// ─── Confirmar e criar RAG (fase 2: upload) ───────────────────
+confirmBtn.addEventListener('click', async () => {
+  if (!extractJobId) return;
+  confirmBtn.disabled = true;
+  hideStatus(); clearLog();
+  progressLog.classList.remove('hidden');
+  appendLog('Iniciando indexação...');
+
+  const edits = [...previewList.querySelectorAll('.preview-textarea')].map(ta => ({
+    name: ta.dataset.name,
+    text: ta.value,
+  }));
+
+  try {
+    const res  = await fetch('/confirm-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extractJobId, edits, name: selectedFiles[0]?.name }),
+    });
+    const data = await res.json();
+    if (data.error) { showStatus(data.error, 'error'); confirmBtn.disabled = false; return; }
+    previewPanel.classList.add('hidden');
+    listenProgress(data.jobId, () => { confirmBtn.disabled = false; });
+  } catch (e) {
+    showStatus('Erro de conexão: ' + e.message, 'error');
+    confirmBtn.disabled = false;
+  }
+});
+
+cancelPreviewBtn.addEventListener('click', () => {
+  previewPanel.classList.add('hidden');
+  extractJobId = null;
+  uploadBtn.disabled = false;
 });
 
 // ─── Escanear páginas ─────────────────────────────────────────

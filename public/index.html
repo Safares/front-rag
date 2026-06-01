@@ -91,6 +91,18 @@
       </div>
 
       <div id="progress-log" class="progress-log hidden"></div>
+
+      <!-- PREVIEW SECTION -->
+      <div id="preview-panel" class="preview-panel hidden">
+        <h3 style="margin-bottom:12px;color:#c084fc">Revisar texto extraído</h3>
+        <p style="margin-bottom:16px;font-size:0.85rem;opacity:0.75">
+          Confirme ou edite o texto antes de indexar. Suas alterações substituirão o conteúdo enviado ao RAG.
+        </p>
+        <div id="preview-list"></div>
+        <button class="btn-primary" id="confirm-btn" style="margin-top:16px">Confirmar e criar RAG</button>
+        <button class="btn-text" id="cancel-preview-btn" style="margin-left:12px">Cancelar</button>
+      </div>
+
       <div id="upload-status" class="status hidden"></div>
     </section>
 

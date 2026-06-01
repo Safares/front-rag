@@ -565,6 +565,105 @@ def scrape_and_upload(api_key: str, provider: str, urls: list[str], name: str) -
         return {"store_id": store.name, "store_name": store.name, "provider": "gemini"}
 
 
+# ─── Upload por texto (extract→confirm flow) ──────────────────
+
+def _upload_texts_openai(api_key: str, texts: list, name: str) -> dict:
+    import io
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    progress("Criando Vector Store...")
+    vs = client.vector_stores.create(name=f"kb-{name[:40]}")
+    progress(f"Vector Store criado: {vs.id}")
+
+    uploaded, failed = [], []
+    total = len(texts)
+
+    for i, entry in enumerate(texts, 1):
+        fname = entry['name']
+        text  = entry['text']
+        try:
+            chunks = chunk_text(text)
+            stem   = Path(fname).stem
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
+            for n, chunk in enumerate(chunks, 1):
+                cname = f"{stem}_parte{n}.txt" if len(chunks) > 1 else f"{stem}.txt"
+                cbytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {cname} ({len(cbytes)/1024:.1f} KB)...")
+                client.vector_stores.files.upload_and_poll(
+                    vector_store_id=vs.id,
+                    file=(cname, io.BytesIO(cbytes), "text/plain"),
+                )
+                progress(f"[{i}/{total}] {cname} indexado.")
+            uploaded.append(fname)
+        except Exception as e:
+            failed.append(fname)
+            progress(f"[{i}/{total}] ERRO em {fname}: {e}")
+
+    if not uploaded:
+        error("Nenhum texto pôde ser indexado.")
+    progress("Indexacao concluida!")
+    return {"store_id": vs.id, "store_name": vs.name, "provider": "openai",
+            "files_uploaded": uploaded, "files_failed": failed}
+
+
+def _upload_texts_gemini(api_key: str, texts: list, name: str) -> dict:
+    import tempfile
+    import os
+    from google import genai
+    client = genai.Client(api_key=api_key)
+
+    progress("Criando File Search Store...")
+    store = client.file_search_stores.create(
+        config={"display_name": _ascii_safe(f"kb-{name[:40]}")}
+    )
+    progress(f"Store criado: {store.name}")
+
+    uploaded, failed = [], []
+    total = len(texts)
+
+    for i, entry in enumerate(texts, 1):
+        fname = entry['name']
+        text  = entry['text']
+        try:
+            chunks = chunk_text(text)
+            stem   = Path(fname).stem
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
+            for n, chunk in enumerate(chunks, 1):
+                cname  = _ascii_filename(f"{stem}_parte{n}.txt" if len(chunks) > 1 else f"{stem}.txt")
+                cbytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {cname} ({len(cbytes)/1024:.1f} KB)...")
+                tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+                try:
+                    tmp.write(cbytes)
+                    tmp.close()
+                    operation = client.file_search_stores.upload_to_file_search_store(
+                        file=tmp.name,
+                        file_search_store_name=store.name,
+                        config={"display_name": _ascii_safe(cname)},
+                    )
+                finally:
+                    os.unlink(tmp.name)
+                progress(f"[{i}/{total}] Indexando {cname}...")
+                while not operation.done:
+                    time.sleep(5)
+                    operation = client.operations.get(operation)
+                    progress(f"[{i}/{total}] ...aguardando {cname}")
+                progress(f"[{i}/{total}] {cname} indexado.")
+            uploaded.append(fname)
+        except Exception as e:
+            failed.append(fname)
+            progress(f"[{i}/{total}] ERRO em {fname}: {e}")
+
+    if not uploaded:
+        error("Nenhum texto pôde ser indexado.")
+    progress("Indexacao concluida!")
+    return {"store_id": store.name, "store_name": store.name, "provider": "gemini",
+            "files_uploaded": uploaded, "files_failed": failed}
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -592,6 +691,15 @@ def main():
     sc.add_argument("--key",        required=True)
     sc.add_argument("--urls-file",  required=True)
     sc.add_argument("--name",       required=True)
+
+    ex = sub.add_parser("extract")
+    ex.add_argument("--files-file", required=True, dest="files_file")
+
+    ut = sub.add_parser("upload-text")
+    ut.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    ut.add_argument("--key", required=True)
+    ut.add_argument("--texts-file", required=True, dest="texts_file")
+    ut.add_argument("--name", required=True)
 
     args = parser.parse_args()
 
@@ -626,6 +734,38 @@ def main():
             with open(args.urls_file) as f:
                 urls = json.load(f)
             data = scrape_and_upload(args.key, args.provider, urls, args.name)
+            result(data)
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "extract":
+        try:
+            with open(args.files_file) as f:
+                file_entries = json.load(f)
+            previews = []
+            for entry in file_entries:
+                fp = Path(entry['path'])
+                name = entry['name']
+                progress(f"Extraindo {name}...")
+                try:
+                    content_bytes, _ = read_file_as_bytes(fp)
+                    text = content_bytes.decode("utf-8", errors="replace")
+                    previews.append({"name": name, "text": text})
+                    progress(f"Extraído: {name} ({len(text)} chars)")
+                except Exception as e:
+                    progress(f"Erro em {name}: {e}")
+            if not previews:
+                error("Nenhum arquivo pôde ser extraído.")
+            result({"previews": previews})
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "upload-text":
+        try:
+            with open(args.texts_file) as f:
+                texts = json.load(f)  # lista de {"name": str, "text": str}
+            data = _upload_texts_openai(args.key, texts, args.name) if args.provider == "openai" \
+                   else _upload_texts_gemini(args.key, texts, args.name)
             result(data)
         except Exception as e:
             error(str(e))
