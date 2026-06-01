@@ -774,6 +774,108 @@ def _upload_texts_gemini(api_key: str, texts: list, name: str) -> dict:
             "files_uploaded": uploaded, "files_failed": failed}
 
 
+# ─── Add files to existing store ─────────────────────────────
+
+def add_files_openai(api_key: str, store_id: str, file_entries: list) -> dict:
+    import io
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    progress(f"Adicionando ao Vector Store {store_id}...")
+
+    uploaded, failed = [], []
+    total = len(file_entries)
+
+    for i, entry in enumerate(file_entries, 1):
+        fp   = Path(entry['path'])
+        name = entry['name']
+        try:
+            content_bytes, upload_name = read_file_as_bytes(fp)
+            text = content_bytes.decode("utf-8", errors="replace")
+            chunks = chunk_text(text)
+            stem = Path(upload_name).stem
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {name}: dividido em {len(chunks)} chunks.")
+            for n, chunk in enumerate(chunks, 1):
+                chunk_name = f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
+                chunk_bytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {chunk_name} ({len(chunk_bytes)/1024:.1f} KB)...")
+                client.vector_stores.files.upload_and_poll(
+                    vector_store_id=store_id,
+                    file=(chunk_name, io.BytesIO(chunk_bytes), "text/plain"),
+                )
+                progress(f"[{i}/{total}] {chunk_name} indexado.")
+            uploaded.append(name)
+        except Exception as e:
+            failed.append(name)
+            progress(f"[{i}/{total}] ERRO em {name}: {e}")
+
+    if not uploaded:
+        error("Nenhum arquivo pôde ser indexado.")
+    progress("Adição concluída!")
+    return {"store_id": store_id, "provider": "openai",
+            "files_uploaded": uploaded, "files_failed": failed}
+
+
+def add_files_gemini(api_key: str, store_name: str, file_entries: list) -> dict:
+    import tempfile
+    import os
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    progress(f"Adicionando ao File Search Store {store_name}...")
+
+    uploaded, failed = [], []
+    total = len(file_entries)
+
+    for i, entry in enumerate(file_entries, 1):
+        fp   = Path(entry['path'])
+        name = entry['name']
+        try:
+            content_bytes, upload_name = read_file_as_bytes(fp)
+            text = content_bytes.decode("utf-8", errors="replace")
+            chunks = chunk_text(text)
+            stem = Path(upload_name).stem
+
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {name}: dividido em {len(chunks)} chunks.")
+
+            chunk_ok = False
+            for n, chunk in enumerate(chunks, 1):
+                chunk_name = _ascii_filename(f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name)
+                chunk_bytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
+                tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+                try:
+                    tmp.write(chunk_bytes)
+                    tmp.close()
+                    operation = client.file_search_stores.upload_to_file_search_store(
+                        file=tmp.name,
+                        file_search_store_name=store_name,
+                        config={"display_name": _ascii_safe(chunk_name)},
+                    )
+                finally:
+                    os.unlink(tmp.name)
+                progress(f"[{i}/{total}] Indexando {chunk_name}...")
+                while not operation.done:
+                    time.sleep(5)
+                    operation = client.operations.get(operation)
+                    progress(f"[{i}/{total}] ...aguardando {chunk_name}")
+                progress(f"[{i}/{total}] {chunk_name} indexado.")
+                chunk_ok = True
+
+            if chunk_ok:
+                uploaded.append(name)
+        except Exception as e:
+            failed.append(name)
+            progress(f"[{i}/{total}] ERRO em {name}: {e}")
+
+    if not uploaded:
+        error("Nenhum arquivo pôde ser indexado.")
+    progress("Adição concluída!")
+    return {"store_id": store_name, "provider": "gemini",
+            "files_uploaded": uploaded, "files_failed": failed}
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -810,6 +912,12 @@ def main():
     ut.add_argument("--key", required=True)
     ut.add_argument("--texts-file", required=True, dest="texts_file")
     ut.add_argument("--name", required=True)
+
+    ad = sub.add_parser("add")
+    ad.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    ad.add_argument("--key", required=True)
+    ad.add_argument("--store", required=True)
+    ad.add_argument("--files-file", required=True, dest="files_file")
 
     args = parser.parse_args()
 
@@ -876,6 +984,16 @@ def main():
                 texts = json.load(f)  # lista de {"name": str, "text": str}
             data = _upload_texts_openai(args.key, texts, args.name) if args.provider == "openai" \
                    else _upload_texts_gemini(args.key, texts, args.name)
+            result(data)
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "add":
+        try:
+            with open(args.files_file) as f:
+                file_entries = json.load(f)
+            data = add_files_openai(args.key, args.store, file_entries) if args.provider == "openai" \
+                   else add_files_gemini(args.key, args.store, file_entries)
             result(data)
         except Exception as e:
             error(str(e))

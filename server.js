@@ -387,6 +387,28 @@ app.get('/rags', async (_req, res) => {
   try { res.json(await listRags()); } catch { res.json([]); }
 });
 
+async function updateRagFileCount(storeId, countDelta) {
+  if (db) {
+    await db.query(
+      'UPDATE rags SET file_count = file_count + $1 WHERE store_id = $2',
+      [countDelta, storeId]
+    );
+  } else {
+    const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      try {
+        const ragFile = path.join(RAGS_DIR, f);
+        const rag = JSON.parse(fs.readFileSync(ragFile, 'utf-8'));
+        if (rag.store_id === storeId) {
+          rag.file_count = (rag.file_count || 0) + countDelta;
+          fs.writeFileSync(ragFile, JSON.stringify(rag, null, 2));
+          break;
+        }
+      } catch {}
+    }
+  }
+}
+
 // ─── GET /rags/:storeId ───────────────────────────────────────
 app.get('/rags/:storeId', async (req, res) => {
   try {
@@ -410,6 +432,88 @@ app.get('/rags/:storeId', async (req, res) => {
   } catch {
     res.status(500).json({ error: 'Erro interno.' });
   }
+});
+
+// ─── POST /rags/:storeId/add ──────────────────────────────────
+app.post('/rags/:storeId/add', upload.array('files', 20), (req, res) => {
+  const { storeId } = req.params;
+  const { api_key: apiKey, ai_type: aiType } = req.body;
+  if (!req.files?.length || !apiKey || !aiType) {
+    return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
+  }
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+  res.json({ jobId });
+
+  const renamedPaths = req.files.map(f => {
+    const ext  = path.extname(f.originalname).toLowerCase();
+    const dest = ext ? f.path + ext : f.path;
+    if (ext) fs.renameSync(f.path, dest);
+    return dest;
+  });
+
+  const filesManifest = path.join(__dirname, 'uploads', `files_${jobId}.json`);
+  fs.writeFileSync(filesManifest, JSON.stringify(
+    req.files.map((f, i) => ({ path: renamedPaths[i], name: f.originalname }))
+  ));
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'add',
+    '--provider',   aiType,
+    '--key',        apiKey,
+    '--store',      storeId,
+    '--files-file', filesManifest,
+  ]);
+
+  let buf = '';
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) {
+        emitter.emit('progress', t.slice('PROGRESS:'.length));
+      } else if (t.startsWith('RESULT:')) {
+        try {
+          const r = JSON.parse(t.slice('RESULT:'.length));
+          const addedCount = r.files_uploaded?.length || 0;
+          updateRagFileCount(storeId, addedCount).catch(e => console.error('Erro ao atualizar file_count:', e.message));
+          const job = jobs.get(jobId);
+          job.result = r;
+          job.status = 'done';
+          emitter.emit('done', { ...r, added: addedCount });
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error';
+          job.error  = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error';
+        job.error  = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    renamedPaths.forEach(p => fs.unlink(p, () => {}));
+    fs.unlink(filesManifest, () => {});
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error';
+      job.error  = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
 });
 
 // ─── POST /extract ────────────────────────────────────────────

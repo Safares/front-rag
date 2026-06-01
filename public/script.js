@@ -508,53 +508,31 @@ function exportAsPDF() {
   const date     = new Date().toLocaleDateString('pt-BR');
   const messages = loadHistory(session.storeId);
 
-  // Monta HTML para impressão
   const printWindow = window.open('', '_blank');
   if (!printWindow) return;
 
-  let htmlContent = `<!DOCTYPE html><html><head>
-    <meta charset="UTF-8">
-    <title>Chat — ${ragName}</title>
-    <style>
-      body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #1a1a2e; }
-      h1 { color: #7c3aed; }
-      .msg-user { background: #f3f0ff; padding: 10px 14px; border-radius: 8px; margin: 8px 0; }
-      .msg-ai { background: #f8fafc; padding: 10px 14px; border-radius: 8px; margin: 8px 0; border-left: 3px solid #7c3aed; }
-      .label { font-weight: bold; font-size: 0.85em; color: #7c3aed; margin-bottom: 4px; }
-      .citations { font-size: 0.8em; color: #6b7280; margin-top: 4px; }
-      hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
-    </style>
-  </head><body>
-    <h1>Chat com ${ragName}</h1>
-    <p style="color:#6b7280">Exportado em ${date}</p><hr>`;
-
-  messages.forEach(m => {
-    if (m.role === 'user') {
-      htmlContent += `<div class="msg-user"><div class="label">Você</div>${m.text.replace(/</g, '&lt;')}</div>`;
-    } else if (m.role === 'assistant') {
-      htmlContent += `<div class="msg-ai"><div class="label">IA</div>${m.text.replace(/</g, '&lt;')}`;
-      if (m.citations?.length) {
-        htmlContent += `<div class="citations">Fontes: ${m.citations.map(c => c.replace(/</g, '&lt;')).join(', ')}</div>`;
-      }
-      htmlContent += '</div>';
-    }
-  });
-
   const doc = printWindow.document;
-
-  // <head>
   doc.documentElement.lang = 'pt-BR';
-  doc.head.innerHTML = `<meta charset="UTF-8"><title>Chat — ${ragName}</title><style>
-    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #1a1a2e; }
-    h1 { color: #7c3aed; }
-    .msg-user { background: #f3f0ff; padding: 10px 14px; border-radius: 8px; margin: 8px 0; }
-    .msg-ai { background: #f8fafc; padding: 10px 14px; border-radius: 8px; margin: 8px 0; border-left: 3px solid #7c3aed; }
-    .label { font-weight: bold; font-size: 0.85em; color: #7c3aed; margin-bottom: 4px; }
-    .citations { font-size: 0.8em; color: #6b7280; margin-top: 4px; }
-    hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
-  </style>`;
 
-  // <body>
+  // Build <head> with safe DOM APIs — never interpolate ragName into innerHTML
+  const metaEl = doc.createElement('meta');
+  metaEl.setAttribute('charset', 'UTF-8');
+  const titleEl = doc.createElement('title');
+  titleEl.textContent = `Chat — ${ragName}`;
+  const styleEl = doc.createElement('style');
+  styleEl.textContent = [
+    'body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:20px;color:#1a1a2e}',
+    'h1{color:#7c3aed}',
+    '.msg-user{background:#f3f0ff;padding:10px 14px;border-radius:8px;margin:8px 0}',
+    '.msg-ai{background:#f8fafc;padding:10px 14px;border-radius:8px;margin:8px 0;border-left:3px solid #7c3aed}',
+    '.label{font-weight:bold;font-size:.85em;color:#7c3aed;margin-bottom:4px}',
+    '.citations{font-size:.8em;color:#6b7280;margin-top:4px}',
+    'hr{border:none;border-top:1px solid #e5e7eb;margin:16px 0}',
+  ].join('');
+  doc.head.appendChild(metaEl);
+  doc.head.appendChild(titleEl);
+  doc.head.appendChild(styleEl);
+
   const body = doc.body;
 
   const h1 = doc.createElement('h1');
@@ -708,9 +686,15 @@ async function loadRags() {
       useBtn.textContent = 'Usar';
       useBtn.addEventListener('click', () => selectRag(rag));
 
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn-text';
+      addBtn.textContent = 'Adicionar';
+      addBtn.addEventListener('click', () => openAddFilesDialog(rag));
+
       card.appendChild(nameEl);
       card.appendChild(metaEl);
       card.appendChild(useBtn);
+      card.appendChild(addBtn);
       ragsList.appendChild(card);
     });
   } catch {
@@ -718,7 +702,63 @@ async function loadRags() {
   }
 }
 
+function openAddFilesDialog(rag) {
+  if (!apiKeyInput.value.trim()) {
+    showStatus('Insira sua API key antes de adicionar arquivos.', 'error');
+    apiKeyInput.focus();
+    return;
+  }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.txt,.md,.pdf,.xlsx,.xls,.csv,.docx,.pptx';
+  input.multiple = true;
+  input.addEventListener('change', () => {
+    if (!input.files.length) return;
+    addFilesToRag(rag, input.files);
+  });
+  input.click();
+}
+
+async function addFilesToRag(rag, files) {
+  clearLog();
+  progressLog.classList.remove('hidden');
+  appendLog(`Adicionando ${files.length} arquivo(s) ao RAG "${rag.filename || rag.store_id}"...`);
+
+  const formData = new FormData();
+  for (const file of files) formData.append('files', file);
+  formData.append('api_key', apiKeyInput.value.trim());
+  formData.append('ai_type', rag.provider);
+
+  try {
+    const res  = await fetch(`/rags/${rag.store_id}/add`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.error) { showStatus(data.error, 'error'); return; }
+
+    const es = new EventSource(`/progress/${data.jobId}`);
+    es.addEventListener('progress', (e) => appendLog(JSON.parse(e.data).message));
+    es.addEventListener('done', (e) => {
+      es.close();
+      const r = JSON.parse(e.data);
+      showStatus(`${r.added} arquivo(s) adicionado(s) com sucesso ao RAG!`, 'success');
+      loadRags();
+    });
+    es.addEventListener('error', (e) => {
+      es.close();
+      let msg = 'Erro ao adicionar arquivos.';
+      try { msg = JSON.parse(e.data).error; } catch {}
+      showStatus(msg, 'error');
+    });
+  } catch (e) {
+    showStatus('Erro de conexão: ' + e.message, 'error');
+  }
+}
+
 function selectRag(rag) {
+  if (!apiKeyInput.value.trim()) {
+    showStatus('Insira sua API key antes de usar um RAG existente.', 'error');
+    apiKeyInput.focus();
+    return;
+  }
   session = { apiKey: apiKeyInput.value.trim(), aiType: rag.provider, storeId: rag.store_id };
 
   document.getElementById('r-filename').textContent = rag.filename || '—';
