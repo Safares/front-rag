@@ -530,3 +530,31 @@ header p { color: #888; margin-top: 8px; }
   color: #c084fc;
   white-space: nowrap;
 }
+
+/* RAG Dashboard */
+.rags-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rag-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: 10px;
+}
+
+.rag-card-name {
+  font-weight: 600;
+  flex: 1;
+  font-size: 0.9rem;
+}
+
+.rag-card-meta {
+  font-size: 0.8rem;
+  opacity: 0.65;
+}

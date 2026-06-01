@@ -13,6 +13,15 @@
       <p>Crie uma base de conhecimento com OpenAI ou Gemini</p>
     </header>
 
+    <!-- DASHBOARD DE RAGS -->
+    <section class="card" id="rags-dashboard" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0">RAGs existentes</h2>
+        <button class="btn-text" id="refresh-rags-btn">Atualizar</button>
+      </div>
+      <div id="rags-list" class="rags-list"></div>
+    </section>
+
     <!-- CONFIGURAÇÃO -->
     <section class="card" id="config-panel">
       <h2>1. Provedor</h2>

@@ -669,3 +669,76 @@ function addMessage(text, role, citations = []) {
   chatBox.scrollTop = chatBox.scrollHeight;
   return div;
 }
+
+// ─── Dashboard de RAGs ────────────────────────────────────────
+const ragsDashboard  = document.getElementById('rags-dashboard');
+const ragsList       = document.getElementById('rags-list');
+const refreshRagsBtn = document.getElementById('refresh-rags-btn');
+
+async function loadRags() {
+  try {
+    const res  = await fetch('/rags');
+    const rags = await res.json();
+    if (!Array.isArray(rags) || !rags.length) {
+      ragsDashboard.style.display = 'none';
+      return;
+    }
+    ragsDashboard.style.display = '';
+    ragsList.innerHTML = '';
+    rags.forEach(rag => {
+      const card = document.createElement('div');
+      card.className = 'rag-card';
+
+      const providerLabel = rag.provider === 'openai' ? '🤖 OpenAI' : '✨ Gemini';
+      const dateStr = rag.createdAt
+        ? new Date(rag.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+        : '—';
+      const fileCount = rag.file_count != null ? `${rag.file_count} arquivo${rag.file_count !== 1 ? 's' : ''}` : '—';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'rag-card-name';
+      nameEl.textContent = rag.filename || rag.store_name || rag.store_id;
+
+      const metaEl = document.createElement('div');
+      metaEl.className = 'rag-card-meta';
+      metaEl.textContent = `${providerLabel} · ${fileCount} · ${dateStr}`;
+
+      const useBtn = document.createElement('button');
+      useBtn.className = 'btn-text';
+      useBtn.textContent = 'Usar';
+      useBtn.addEventListener('click', () => selectRag(rag));
+
+      card.appendChild(nameEl);
+      card.appendChild(metaEl);
+      card.appendChild(useBtn);
+      ragsList.appendChild(card);
+    });
+  } catch {
+    ragsDashboard.style.display = 'none';
+  }
+}
+
+function selectRag(rag) {
+  session = { apiKey: apiKeyInput.value.trim(), aiType: rag.provider, storeId: rag.store_id };
+
+  document.getElementById('r-filename').textContent = rag.filename || '—';
+  document.getElementById('r-provider').textContent = rag.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
+  document.getElementById('r-store-id').textContent = rag.store_id;
+  document.getElementById('r-saved').textContent = `rags/${(rag.filename || 'rag').replace(/\.[^.]+$/, '')}.json`;
+  resultPanel.classList.remove('hidden');
+
+  chatPanel.classList.remove('hidden');
+  const existing = loadHistory(rag.store_id);
+  if (existing.length > 0) {
+    renderHistory(rag.store_id);
+  } else {
+    chatBox.innerHTML = '';
+    addMessage(`RAG "${rag.filename || rag.store_name}" selecionado. Faça uma pergunta!`, 'assistant');
+  }
+  chatPanel.scrollIntoView({ behavior: 'smooth' });
+}
+
+refreshRagsBtn.addEventListener('click', loadRags);
+
+// Carregar RAGs na inicialização
+loadRags();

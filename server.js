@@ -43,6 +43,7 @@ if (process.env.DATABASE_URL) {
       store_name TEXT,
       provider   TEXT        NOT NULL,
       filename   TEXT,
+      file_count INT         DEFAULT 0,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `).catch(e => console.error('Erro ao criar tabela rags:', e.message));
@@ -54,8 +55,8 @@ if (process.env.DATABASE_URL) {
 async function saveRag(data) {
   if (db) {
     await db.query(
-      'INSERT INTO rags (store_id, store_name, provider, filename) VALUES ($1, $2, $3, $4)',
-      [data.store_id, data.store_name, data.provider, data.filename]
+      'INSERT INTO rags (store_id, store_name, provider, filename, file_count) VALUES ($1, $2, $3, $4, $5)',
+      [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0]
     );
   } else {
     const stem    = path.parse(data.filename || 'rag').name;
@@ -67,7 +68,7 @@ async function saveRag(data) {
 async function listRags() {
   if (db) {
     const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
+      'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
     );
     return rows;
   }
@@ -141,7 +142,8 @@ app.post('/upload', upload.array('files', 20), (req, res) => {
       } else if (t.startsWith('RESULT:')) {
         try {
           const r = JSON.parse(t.slice('RESULT:'.length));
-          r.filename = displayName;
+          r.filename   = displayName;
+          r.file_count = r.files_uploaded?.length || 0;
           saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
           const job = jobs.get(jobId);
           job.result = r;
@@ -346,7 +348,8 @@ app.post('/scrape', (req, res) => {
       } else if (t.startsWith('RESULT:')) {
         try {
           const r = JSON.parse(t.slice('RESULT:'.length));
-          r.filename = name;
+          r.filename   = name;
+          r.file_count = r.files_uploaded?.length || 0;
           saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
           const job = jobs.get(jobId);
           job.result = r;
@@ -382,6 +385,31 @@ app.post('/scrape', (req, res) => {
 // ─── GET /rags ────────────────────────────────────────────────
 app.get('/rags', async (_req, res) => {
   try { res.json(await listRags()); } catch { res.json([]); }
+});
+
+// ─── GET /rags/:storeId ───────────────────────────────────────
+app.get('/rags/:storeId', async (req, res) => {
+  try {
+    const { storeId } = req.params;
+    if (db) {
+      const { rows } = await db.query(
+        'SELECT store_id, store_name, provider, filename, file_count, created_at AS "createdAt" FROM rags WHERE store_id = $1',
+        [storeId]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'RAG não encontrado.' });
+      return res.json(rows[0]);
+    }
+    const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      try {
+        const rag = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+        if (rag.store_id === storeId) return res.json(rag);
+      } catch {}
+    }
+    res.status(404).json({ error: 'RAG não encontrado.' });
+  } catch {
+    res.status(500).json({ error: 'Erro interno.' });
+  }
 });
 
 // ─── POST /extract ────────────────────────────────────────────
@@ -522,7 +550,8 @@ app.post('/confirm-upload', async (req, res) => {
       } else if (t.startsWith('RESULT:')) {
         try {
           const r = JSON.parse(t.slice('RESULT:'.length));
-          r.filename = displayName;
+          r.filename   = displayName;
+          r.file_count = r.files_uploaded?.length || 0;
           saveRag(r).catch(e => console.error('Erro ao salvar RAG:', e.message));
           const job = jobs.get(jobId);
           job.result = r;
