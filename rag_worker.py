@@ -38,11 +38,13 @@ def error(msg: str) -> None:
 def _extract_pdf_text(path: Path) -> str:
     """Extrai texto de PDF. Usa OCR como fallback para PDFs escaneados."""
     parts = []
+    num_pages = 1
 
-    # Tentativa 1: pdfplumber
+    # Tentativa 1: pdfplumber — guarda num_pages para evitar segunda abertura
     try:
         import pdfplumber
         with pdfplumber.open(path) as pdf:
+            num_pages = max(len(pdf.pages), 1)
             for page in pdf.pages:
                 t = page.extract_text()
                 if t:
@@ -57,6 +59,7 @@ def _extract_pdf_text(path: Path) -> str:
         try:
             import pypdf
             reader = pypdf.PdfReader(str(path))
+            num_pages = max(len(reader.pages), 1)
             for page in reader.pages:
                 t = page.extract_text() or ""
                 if t.strip():
@@ -68,16 +71,8 @@ def _extract_pdf_text(path: Path) -> str:
 
     combined = "\n\n".join(parts)
 
-    # Verifica se o texto extraído é significativo
-    # (< 50 chars por página em média = provavelmente PDF escaneado)
-    try:
-        import pdfplumber
-        with pdfplumber.open(path) as pdf:
-            num_pages = len(pdf.pages)
-    except Exception:
-        num_pages = max(1, len(parts))
-
-    is_scanned = len(combined.strip()) < 50 * max(num_pages, 1)
+    # < 50 chars por página em média → provável PDF escaneado
+    is_scanned = len(combined.strip()) < 50 * num_pages
 
     if is_scanned:
         progress(f"PDF escaneado detectado em {path.name}, usando OCR (pode demorar)...")
@@ -99,7 +94,8 @@ def _extract_pdf_text(path: Path) -> str:
         except Exception as e:
             progress(f"Erro no OCR: {e}")
 
-    return combined if combined else f"[PDF sem texto extraível: {path.name}]"
+    # Retorna string vazia se nenhuma extração funcionou — o caller marcará como falha
+    return combined
 
 
 def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
