@@ -137,6 +137,43 @@ def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
                 continue
         return "\n".join(lines).encode("utf-8"), path.stem + ".txt"
 
+    if ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(str(path))
+            parts = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    parts.append(para.text)
+            for table in doc.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            return "\n\n".join(parts).encode("utf-8"), path.stem + ".txt"
+        except ImportError:
+            error("Instale python-docx: pip install python-docx")
+
+    if ext == ".pptx":
+        try:
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                slide_parts = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            text = para.text.strip()
+                            if text:
+                                slide_parts.append(text)
+                if slide_parts:
+                    title = slide_parts[0] if slide_parts else f"Slide {i}"
+                    parts.append(f"## Slide {i}: {title}\n\n" + "\n".join(slide_parts))
+            return "\n\n".join(parts).encode("utf-8"), path.stem + ".txt"
+        except ImportError:
+            error("Instale python-pptx: pip install python-pptx")
+
     error(f"Formato nao suportado: {ext}")
 
 
