@@ -429,6 +429,181 @@ function clearHistory(storeId) {
   localStorage.removeItem(historyKey(storeId));
 }
 
+// ─── Exportar conversa ────────────────────────────────────────
+const exportChatBtn = document.getElementById('export-chat-btn');
+
+exportChatBtn.addEventListener('click', () => {
+  if (!session.storeId) return;
+  showExportMenu();
+});
+
+function showExportMenu() {
+  // Remove menu anterior se existir
+  const existing = document.getElementById('export-menu');
+  if (existing) { existing.remove(); return; }
+
+  const menu = document.createElement('div');
+  menu.id = 'export-menu';
+  menu.className = 'export-menu';
+
+  const mdBtn = document.createElement('button');
+  mdBtn.textContent = 'Markdown (.md)';
+  mdBtn.addEventListener('click', () => { exportAsMarkdown(); menu.remove(); });
+
+  const pdfBtn = document.createElement('button');
+  pdfBtn.textContent = 'PDF (.pdf)';
+  pdfBtn.addEventListener('click', () => { exportAsPDF(); menu.remove(); });
+
+  menu.appendChild(mdBtn);
+  menu.appendChild(pdfBtn);
+
+  // Posicionar próximo ao botão
+  exportChatBtn.parentNode.appendChild(menu);
+
+  // Fechar ao clicar fora
+  setTimeout(() => {
+    document.addEventListener('click', function closeMenu(e) {
+      if (!menu.contains(e.target) && e.target !== exportChatBtn) {
+        menu.remove();
+        document.removeEventListener('click', closeMenu);
+      }
+    });
+  }, 0);
+}
+
+function buildMarkdownText() {
+  const ragName = document.getElementById('r-filename').textContent || session.storeId;
+  const date    = new Date().toLocaleDateString('pt-BR');
+  const messages = loadHistory(session.storeId);
+
+  let md = `# Chat com ${ragName} — ${date}\n\n`;
+  messages.forEach(m => {
+    if (m.role === 'user') {
+      md += `**Você:** ${m.text}\n\n`;
+    } else if (m.role === 'assistant') {
+      md += `**IA:** ${m.text}\n`;
+      if (m.citations?.length) {
+        md += `\n*Fontes: ${m.citations.join(', ')}*\n`;
+      }
+      md += '\n---\n\n';
+    }
+  });
+  return md;
+}
+
+function exportAsMarkdown() {
+  const ragName = document.getElementById('r-filename').textContent || 'chat';
+  const md      = buildMarkdownText();
+  const blob    = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+  const url     = URL.createObjectURL(blob);
+  const a       = document.createElement('a');
+  a.href        = url;
+  a.download    = `chat-${ragName.replace(/[^a-z0-9]/gi, '_')}.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportAsPDF() {
+  const ragName  = document.getElementById('r-filename').textContent || session.storeId;
+  const date     = new Date().toLocaleDateString('pt-BR');
+  const messages = loadHistory(session.storeId);
+
+  // Monta HTML para impressão
+  const printWindow = window.open('', '_blank');
+  if (!printWindow) return;
+
+  let htmlContent = `<!DOCTYPE html><html><head>
+    <meta charset="UTF-8">
+    <title>Chat — ${ragName}</title>
+    <style>
+      body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #1a1a2e; }
+      h1 { color: #7c3aed; }
+      .msg-user { background: #f3f0ff; padding: 10px 14px; border-radius: 8px; margin: 8px 0; }
+      .msg-ai { background: #f8fafc; padding: 10px 14px; border-radius: 8px; margin: 8px 0; border-left: 3px solid #7c3aed; }
+      .label { font-weight: bold; font-size: 0.85em; color: #7c3aed; margin-bottom: 4px; }
+      .citations { font-size: 0.8em; color: #6b7280; margin-top: 4px; }
+      hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
+    </style>
+  </head><body>
+    <h1>Chat com ${ragName}</h1>
+    <p style="color:#6b7280">Exportado em ${date}</p><hr>`;
+
+  messages.forEach(m => {
+    if (m.role === 'user') {
+      htmlContent += `<div class="msg-user"><div class="label">Você</div>${m.text.replace(/</g, '&lt;')}</div>`;
+    } else if (m.role === 'assistant') {
+      htmlContent += `<div class="msg-ai"><div class="label">IA</div>${m.text.replace(/</g, '&lt;')}`;
+      if (m.citations?.length) {
+        htmlContent += `<div class="citations">Fontes: ${m.citations.map(c => c.replace(/</g, '&lt;')).join(', ')}</div>`;
+      }
+      htmlContent += '</div>';
+    }
+  });
+
+  const doc = printWindow.document;
+
+  // <head>
+  doc.documentElement.lang = 'pt-BR';
+  doc.head.innerHTML = `<meta charset="UTF-8"><title>Chat — ${ragName}</title><style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #1a1a2e; }
+    h1 { color: #7c3aed; }
+    .msg-user { background: #f3f0ff; padding: 10px 14px; border-radius: 8px; margin: 8px 0; }
+    .msg-ai { background: #f8fafc; padding: 10px 14px; border-radius: 8px; margin: 8px 0; border-left: 3px solid #7c3aed; }
+    .label { font-weight: bold; font-size: 0.85em; color: #7c3aed; margin-bottom: 4px; }
+    .citations { font-size: 0.8em; color: #6b7280; margin-top: 4px; }
+    hr { border: none; border-top: 1px solid #e5e7eb; margin: 16px 0; }
+  </style>`;
+
+  // <body>
+  const body = doc.body;
+
+  const h1 = doc.createElement('h1');
+  h1.textContent = `Chat com ${ragName}`;
+  body.appendChild(h1);
+
+  const meta = doc.createElement('p');
+  meta.style.color = '#6b7280';
+  meta.textContent = `Exportado em ${date}`;
+  body.appendChild(meta);
+
+  const hr = doc.createElement('hr');
+  body.appendChild(hr);
+
+  messages.forEach(m => {
+    if (m.role === 'user') {
+      const wrap = doc.createElement('div');
+      wrap.className = 'msg-user';
+      const label = doc.createElement('div');
+      label.className = 'label';
+      label.textContent = 'Você';
+      const text = doc.createElement('div');
+      text.textContent = m.text;
+      wrap.appendChild(label);
+      wrap.appendChild(text);
+      body.appendChild(wrap);
+    } else if (m.role === 'assistant') {
+      const wrap = doc.createElement('div');
+      wrap.className = 'msg-ai';
+      const label = doc.createElement('div');
+      label.className = 'label';
+      label.textContent = 'IA';
+      const text = doc.createElement('div');
+      text.textContent = m.text;
+      wrap.appendChild(label);
+      wrap.appendChild(text);
+      if (m.citations?.length) {
+        const cit = doc.createElement('div');
+        cit.className = 'citations';
+        cit.textContent = `Fontes: ${m.citations.join(', ')}`;
+        wrap.appendChild(cit);
+      }
+      body.appendChild(wrap);
+    }
+  });
+
+  printWindow.print();
+}
+
 // ─── Chat ─────────────────────────────────────────────────────
 const clearHistoryBtn = document.getElementById('clear-history-btn');
 clearHistoryBtn.addEventListener('click', () => {

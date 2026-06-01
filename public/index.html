@@ -134,7 +134,10 @@
     <section class="card hidden" id="chat-panel">
       <div class="chat-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <h2 style="margin:0">Chat com o documento</h2>
-        <button class="btn-text" id="clear-history-btn" title="Limpar conversa">Limpar</button>
+        <div style="display:flex;gap:8px;position:relative">
+          <button class="btn-text" id="export-chat-btn" title="Exportar conversa">Exportar</button>
+          <button class="btn-text" id="clear-history-btn" title="Limpar conversa">Limpar</button>
+        </div>
       </div>
       <div class="chat-box" id="chat-box"></div>
       <div class="chat-input-row">

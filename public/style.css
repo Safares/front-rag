@@ -480,6 +480,39 @@ header p { color: #888; margin-top: 8px; }
 }
 .btn-use:hover { background: #1e1433; border-color: #7c3aed; }
 
+/* Export menu */
+.chat-header { position: relative; }
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #1e1b4b;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 100;
+  min-width: 160px;
+}
+
+.export-menu button {
+  background: none;
+  border: none;
+  color: #e2e8f0;
+  padding: 8px 12px;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.export-menu button:hover {
+  background: rgba(139, 92, 246, 0.2);
+}
+
 /* Citations */
 .msg-citations {
   display: flex;
