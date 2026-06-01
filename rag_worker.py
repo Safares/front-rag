@@ -108,6 +108,60 @@ def _ascii_filename(name: str) -> str:
     return safe
 
 
+# ─── Chunking semântico ───────────────────────────────────────
+
+CHUNK_MAX_CHARS = 7000
+CHUNK_OVERLAP_CHARS = 700
+
+
+def chunk_text(text: str) -> list[str]:
+    """Break text into overlapping chunks at paragraph/section boundaries."""
+    if len(text) <= CHUNK_MAX_CHARS:
+        return [text]
+
+    chunks = []
+    lines = text.split('\n')
+    current_lines = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1
+        is_section_break = line.startswith('#') or (not line.strip() and current_len > CHUNK_MAX_CHARS // 2)
+
+        if current_len + line_len > CHUNK_MAX_CHARS and current_lines and is_section_break:
+            chunks.append('\n'.join(current_lines))
+            # Overlap: keep last CHUNK_OVERLAP_CHARS worth of lines
+            overlap = []
+            overlap_len = 0
+            for prev in reversed(current_lines):
+                if overlap_len + len(prev) + 1 > CHUNK_OVERLAP_CHARS:
+                    break
+                overlap.insert(0, prev)
+                overlap_len += len(prev) + 1
+            current_lines = overlap
+            current_len = overlap_len
+        elif current_len + line_len > CHUNK_MAX_CHARS * 1.5 and current_lines:
+            # Force break even without section boundary if too large
+            chunks.append('\n'.join(current_lines))
+            overlap = []
+            overlap_len = 0
+            for prev in reversed(current_lines):
+                if overlap_len + len(prev) + 1 > CHUNK_OVERLAP_CHARS:
+                    break
+                overlap.insert(0, prev)
+                overlap_len += len(prev) + 1
+            current_lines = overlap
+            current_len = overlap_len
+
+        current_lines.append(line)
+        current_len += line_len
+
+    if current_lines:
+        chunks.append('\n'.join(current_lines))
+
+    return chunks
+
+
 # ─── OpenAI ───────────────────────────────────────────────────
 
 def upload_openai(api_key: str, file_entries: list) -> dict:
@@ -130,13 +184,27 @@ def upload_openai(api_key: str, file_entries: list) -> dict:
         name = entry['name']
         try:
             content_bytes, upload_name = read_file_as_bytes(fp)
-            progress(f"[{i}/{total}] Enviando {name} ({len(content_bytes) / 1024:.1f} KB)...")
-            client.vector_stores.files.upload_and_poll(
-                vector_store_id=vs.id,
-                file=(upload_name, io.BytesIO(content_bytes), "text/plain"),
-            )
-            uploaded.append(name)
-            progress(f"[{i}/{total}] {name} indexado.")
+            text = content_bytes.decode("utf-8", errors="replace")
+            chunks = chunk_text(text)
+            stem = Path(upload_name).stem
+
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {name}: dividido em {len(chunks)} chunks.")
+
+            chunk_ok = False
+            for n, chunk in enumerate(chunks, 1):
+                chunk_name = f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
+                chunk_bytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
+                client.vector_stores.files.upload_and_poll(
+                    vector_store_id=vs.id,
+                    file=(chunk_name, io.BytesIO(chunk_bytes), "text/plain"),
+                )
+                progress(f"[{i}/{total}] {chunk_name} indexado.")
+                chunk_ok = True
+
+            if chunk_ok:
+                uploaded.append(name)
         except Exception as e:
             failed.append(name)
             progress(f"[{i}/{total}] ERRO em {name}: {e}")
@@ -185,26 +253,40 @@ def upload_gemini(api_key: str, file_entries: list) -> dict:
         name = entry['name']
         try:
             content_bytes, upload_name = read_file_as_bytes(fp)
-            safe_name = _ascii_filename(upload_name)
-            progress(f"[{i}/{total}] Enviando {name} ({len(content_bytes) / 1024:.1f} KB)...")
-            tmp = tempfile.NamedTemporaryFile(suffix=Path(safe_name).suffix, delete=False)
-            try:
-                tmp.write(content_bytes)
-                tmp.close()
-                operation = client.file_search_stores.upload_to_file_search_store(
-                    file=tmp.name,
-                    file_search_store_name=store.name,
-                    config={"display_name": _ascii_safe(upload_name)},
-                )
-            finally:
-                os.unlink(tmp.name)
-            progress(f"[{i}/{total}] Indexando {name}...")
-            while not operation.done:
-                time.sleep(5)
-                operation = client.operations.get(operation)
-                progress(f"[{i}/{total}] ...aguardando {name}")
-            uploaded.append(name)
-            progress(f"[{i}/{total}] {name} indexado.")
+            text = content_bytes.decode("utf-8", errors="replace")
+            chunks = chunk_text(text)
+            stem = Path(upload_name).stem
+
+            if len(chunks) > 1:
+                progress(f"[{i}/{total}] {name}: dividido em {len(chunks)} chunks.")
+
+            chunk_ok = False
+            for n, chunk in enumerate(chunks, 1):
+                chunk_name = f"{stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
+                safe_name = _ascii_filename(chunk_name)
+                chunk_bytes = chunk.encode("utf-8")
+                progress(f"[{i}/{total}] Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
+                tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+                try:
+                    tmp.write(chunk_bytes)
+                    tmp.close()
+                    operation = client.file_search_stores.upload_to_file_search_store(
+                        file=tmp.name,
+                        file_search_store_name=store.name,
+                        config={"display_name": _ascii_safe(chunk_name)},
+                    )
+                finally:
+                    os.unlink(tmp.name)
+                progress(f"[{i}/{total}] Indexando {chunk_name}...")
+                while not operation.done:
+                    time.sleep(5)
+                    operation = client.operations.get(operation)
+                    progress(f"[{i}/{total}] ...aguardando {chunk_name}")
+                progress(f"[{i}/{total}] {chunk_name} indexado.")
+                chunk_ok = True
+
+            if chunk_ok:
+                uploaded.append(name)
         except Exception as e:
             failed.append(name)
             progress(f"[{i}/{total}] ERRO em {name}: {e}")
@@ -372,9 +454,13 @@ def scrape_and_upload(api_key: str, provider: str, urls: list[str], name: str) -
     if not parts:
         error("Nenhuma página pôde ser extraída.")
 
-    combined      = "\n\n---\n\n".join(parts)
-    content_bytes = combined.encode("utf-8")
-    upload_name   = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60] + ".txt"
+    combined    = "\n\n---\n\n".join(parts)
+    upload_stem = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60]
+    upload_name = upload_stem + ".txt"
+    chunks      = chunk_text(combined)
+
+    if len(chunks) > 1:
+        progress(f"Texto combinado dividido em {len(chunks)} chunks para melhor precisão RAG.")
 
     if provider == "openai":
         from openai import OpenAI
@@ -384,44 +470,53 @@ def scrape_and_upload(api_key: str, provider: str, urls: list[str], name: str) -
         vs = client.vector_stores.create(name=f"kb-{name[:40]}")
         progress(f"Vector Store criado: {vs.id}")
 
-        progress(f"Enviando {len(content_bytes) / 1024:.1f} KB...")
-        client.vector_stores.files.upload_and_poll(
-            vector_store_id=vs.id,
-            file=(upload_name, io.BytesIO(content_bytes), "text/plain"),
-        )
+        for n, chunk in enumerate(chunks, 1):
+            chunk_name  = f"{upload_stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
+            chunk_bytes = chunk.encode("utf-8")
+            progress(f"Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
+            client.vector_stores.files.upload_and_poll(
+                vector_store_id=vs.id,
+                file=(chunk_name, io.BytesIO(chunk_bytes), "text/plain"),
+            )
+            progress(f"{chunk_name} indexado.")
+
         progress("Indexacao concluida!")
         return {"store_id": vs.id, "store_name": vs.name, "provider": "openai"}
 
     else:
         from google import genai
-        client    = genai.Client(api_key=api_key)
-        safe_name = _ascii_filename(upload_name)
+        client = genai.Client(api_key=api_key)
         import tempfile, os
-        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
-        try:
-            tmp.write(content_bytes)
-            tmp.close()
 
-            progress("Criando File Search Store...")
-            store = client.file_search_stores.create(
-                config={"display_name": _ascii_safe(f"kb-{name[:40]}")}
-            )
-            progress(f"Store criado: {store.name}")
+        progress("Criando File Search Store...")
+        store = client.file_search_stores.create(
+            config={"display_name": _ascii_safe(f"kb-{name[:40]}")}
+        )
+        progress(f"Store criado: {store.name}")
 
-            progress(f"Enviando {len(content_bytes) / 1024:.1f} KB...")
-            operation = client.file_search_stores.upload_to_file_search_store(
-                file=tmp.name,
-                file_search_store_name=store.name,
-                config={"display_name": _ascii_safe(upload_name)},
-            )
-        finally:
-            os.unlink(tmp.name)
+        for n, chunk in enumerate(chunks, 1):
+            chunk_name  = f"{upload_stem}_parte{n}.txt" if len(chunks) > 1 else upload_name
+            chunk_bytes = chunk.encode("utf-8")
+            tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+            try:
+                tmp.write(chunk_bytes)
+                tmp.close()
 
-        progress("Indexando (pode levar alguns minutos)...")
-        while not operation.done:
-            time.sleep(5)
-            operation = client.operations.get(operation)
-            progress("...aguardando indexacao")
+                progress(f"Enviando {chunk_name} ({len(chunk_bytes) / 1024:.1f} KB)...")
+                operation = client.file_search_stores.upload_to_file_search_store(
+                    file=tmp.name,
+                    file_search_store_name=store.name,
+                    config={"display_name": _ascii_safe(chunk_name)},
+                )
+            finally:
+                os.unlink(tmp.name)
+
+            progress(f"Indexando {chunk_name} (pode levar alguns minutos)...")
+            while not operation.done:
+                time.sleep(5)
+                operation = client.operations.get(operation)
+                progress(f"...aguardando {chunk_name}")
+            progress(f"{chunk_name} indexado.")
 
         progress("Indexacao concluida!")
         return {"store_id": store.name, "store_name": store.name, "provider": "gemini"}
