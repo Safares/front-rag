@@ -168,8 +168,7 @@ def read_file_as_bytes(path: Path) -> tuple[bytes, str]:
                             if text:
                                 slide_parts.append(text)
                 if slide_parts:
-                    title = slide_parts[0] if slide_parts else f"Slide {i}"
-                    parts.append(f"## Slide {i}: {title}\n\n" + "\n".join(slide_parts))
+                    parts.append(f"## Slide {i}: {slide_parts[0]}\n\n" + "\n".join(slide_parts))
             return "\n\n".join(parts).encode("utf-8"), path.stem + ".txt"
         except ImportError:
             error("Instale python-pptx: pip install python-pptx")
