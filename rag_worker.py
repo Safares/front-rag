@@ -919,6 +919,12 @@ def main():
     ad.add_argument("--store", required=True)
     ad.add_argument("--files-file", required=True, dest="files_file")
 
+    mq = sub.add_parser("multi-query")
+    mq.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    mq.add_argument("--key", required=True)
+    mq.add_argument("--stores-file", required=True, dest="stores_file")
+    mq.add_argument("--question", required=True)
+
     args = parser.parse_args()
 
     if args.cmd == "upload":
@@ -995,6 +1001,48 @@ def main():
             data = add_files_openai(args.key, args.store, file_entries) if args.provider == "openai" \
                    else add_files_gemini(args.key, args.store, file_entries)
             result(data)
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "multi-query":
+        try:
+            with open(args.stores_file) as f:
+                stores = json.load(f)  # list of {"store_id": str, "name": str, "provider": str}
+            import asyncio
+
+            async def _query_one(store_entry):
+                sid = store_entry["store_id"]
+                name = store_entry.get("name") or sid
+                provider = store_entry.get("provider", args.provider)
+                try:
+                    try:
+                        r = await asyncio.to_thread(
+                            query_openai if provider == "openai" else query_gemini,
+                            args.key, sid, args.question
+                        )
+                    except AttributeError:
+                        # Python < 3.9: asyncio.to_thread not available — run sequentially
+                        fn = query_openai if provider == "openai" else query_gemini
+                        r = fn(args.key, sid, args.question)
+                    return {"name": name, "answer": r["answer"], "citations": r.get("citations", [])}
+                except Exception as e:
+                    return {"name": name, "answer": f"[Erro: {e}]", "citations": []}
+
+            async def _run_all():
+                tasks = [_query_one(s) for s in stores]
+                return await asyncio.gather(*tasks)
+
+            answers = asyncio.run(_run_all())
+
+            # Combine into a single response with source headers
+            combined_parts = []
+            all_citations = []
+            for a in answers:
+                combined_parts.append(f"### Fonte: {a['name']}\n\n{a['answer']}")
+                all_citations.extend(a["citations"])
+
+            combined = "\n\n---\n\n".join(combined_parts)
+            result({"answer": combined, "citations": all_citations})
         except Exception as e:
             error(str(e))
 

@@ -216,17 +216,49 @@ app.get('/progress/:jobId', (req, res) => {
 
 // ─── POST /query ──────────────────────────────────────────────
 app.post('/query', (req, res) => {
-  const { question, api_key: apiKey, ai_type: aiType, store_id: storeId } = req.body || {};
-  if (!question?.trim() || !apiKey || !aiType || !storeId) {
+  const { question, api_key: apiKey, ai_type: aiType, store_id: storeId, store_ids: storeIds } = req.body || {};
+  if (!question?.trim() || !apiKey || !aiType || (!storeId && !storeIds?.length)) {
     return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
   }
 
   const workerPath = path.join(__dirname, 'rag_worker.py');
+
+  // Multi-RAG: use multi-query subcommand
+  if (storeIds?.length > 1) {
+    const storesFile = path.join(__dirname, 'uploads', `stores_${Date.now().toString(36)}.json`);
+    fs.writeFileSync(storesFile, JSON.stringify(storeIds));  // storeIds is array of {store_id, name, provider}
+
+    const py = spawn('python', [
+      workerPath, 'multi-query',
+      '--provider', aiType,
+      '--key',      apiKey,
+      '--stores-file', storesFile,
+      '--question', question,
+    ]);
+
+    let out = '';
+    py.stdout.on('data', (d) => { out += d.toString(); });
+    py.on('close', () => {
+      fs.unlink(storesFile, () => {});
+      for (const line of out.split('\n')) {
+        if (line.startsWith('RESULT:')) {
+          try { return res.json(JSON.parse(line.slice('RESULT:'.length))); } catch {}
+        }
+        if (line.startsWith('ERROR:')) {
+          return res.status(500).json({ error: line.slice('ERROR:'.length) });
+        }
+      }
+      res.status(500).json({ error: 'Resposta inesperada do worker.' });
+    });
+    return;
+  }
+
+  // Single RAG: existing behavior
   const py = spawn('python', [
     workerPath, 'query',
     '--provider', aiType,
     '--key',      apiKey,
-    '--store',    storeId,
+    '--store',    storeId || storeIds?.[0]?.store_id,
     '--question', question,
   ]);
 

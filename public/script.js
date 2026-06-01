@@ -28,8 +28,9 @@ const apiKeyInput   = document.getElementById('api_key');
 const copyBtn       = document.getElementById('copy-btn');
 
 let selectedFiles = [];
-let session = { apiKey: '', aiType: '', storeId: '' };
+let session = { apiKey: '', aiType: '', storeId: '', storeIds: null };
 let extractJobId = null;
+let selectedRags = [];  // array of {store_id, provider, filename}
 
 // ─── Abas ─────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -433,7 +434,7 @@ function clearHistory(storeId) {
 const exportChatBtn = document.getElementById('export-chat-btn');
 
 exportChatBtn.addEventListener('click', () => {
-  if (!session.storeId) return;
+  if (!session.storeId && !session.storeIds?.length) return;
   showExportMenu();
 });
 
@@ -585,8 +586,7 @@ function exportAsPDF() {
 // ─── Chat ─────────────────────────────────────────────────────
 const clearHistoryBtn = document.getElementById('clear-history-btn');
 clearHistoryBtn.addEventListener('click', () => {
-  if (!session.storeId) return;
-  clearHistory(session.storeId);
+  if (session.storeId) clearHistory(session.storeId);
   chatBox.innerHTML = '';
   addMessage('Conversa limpa. Faça uma nova pergunta.', 'assistant');
 });
@@ -596,30 +596,43 @@ questionInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.s
 
 async function sendQuestion() {
   const q = questionInput.value.trim();
-  if (!q || !session.storeId) return;
+  if (!q || (!session.storeId && !session.storeIds?.length)) return;
   questionInput.value = '';
   sendBtn.disabled = true;
   addMessage(q, 'user');
-  appendToHistory(session.storeId, 'user', q);
+  // Only persist history for single-RAG sessions
+  if (session.storeId) appendToHistory(session.storeId, 'user', q);
   const thinking = addMessage('Pensando...', 'thinking');
+
+  const queryBody = {
+    question: q,
+    api_key: session.apiKey,
+    ai_type: session.aiType,
+  };
+  if (session.storeIds) {
+    queryBody.store_ids = session.storeIds;
+  } else {
+    queryBody.store_id = session.storeId;
+  }
 
   try {
     const res = await fetch('/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q, api_key: session.apiKey, ai_type: session.aiType, store_id: session.storeId }),
+      body: JSON.stringify(queryBody),
     });
     const data = await res.json();
     thinking.remove();
     const answerText = data.error ? 'Erro: ' + data.error : (data.answer || '');
     const answerCitations = data.error ? [] : (data.citations || []);
     addMessage(answerText, 'assistant', answerCitations);
-    appendToHistory(session.storeId, 'assistant', answerText, answerCitations);
+    // Only persist history for single-RAG sessions
+    if (session.storeId) appendToHistory(session.storeId, 'assistant', answerText, answerCitations);
   } catch (e) {
     thinking.remove();
     const errText = 'Erro: ' + e.message;
     addMessage(errText, 'assistant');
-    appendToHistory(session.storeId, 'assistant', errText);
+    if (session.storeId) appendToHistory(session.storeId, 'assistant', errText);
   }
 
   sendBtn.disabled = false;
@@ -654,6 +667,11 @@ const ragsList       = document.getElementById('rags-list');
 const refreshRagsBtn = document.getElementById('refresh-rags-btn');
 
 async function loadRags() {
+  // Reset multi-RAG selection state
+  selectedRags = [];
+  const existingMultiBtn = document.getElementById('multi-query-btn');
+  if (existingMultiBtn) existingMultiBtn.remove();
+
   try {
     const res  = await fetch('/rags');
     const rags = await res.json();
@@ -673,6 +691,18 @@ async function loadRags() {
         : '—';
       const fileCount = rag.file_count != null ? `${rag.file_count} arquivo${rag.file_count !== 1 ? 's' : ''}` : '—';
 
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'rag-select-check';
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          if (!selectedRags.some(r => r.store_id === rag.store_id)) selectedRags.push(rag);
+        } else {
+          selectedRags = selectedRags.filter(r => r.store_id !== rag.store_id);
+        }
+        updateMultiQueryBtn();
+      });
+
       const nameEl = document.createElement('div');
       nameEl.className = 'rag-card-name';
       nameEl.textContent = rag.filename || rag.store_name || rag.store_id;
@@ -691,6 +721,7 @@ async function loadRags() {
       addBtn.textContent = 'Adicionar';
       addBtn.addEventListener('click', () => openAddFilesDialog(rag));
 
+      card.insertBefore(checkbox, card.firstChild);
       card.appendChild(nameEl);
       card.appendChild(metaEl);
       card.appendChild(useBtn);
@@ -700,6 +731,54 @@ async function loadRags() {
   } catch {
     ragsDashboard.style.display = 'none';
   }
+}
+
+function updateMultiQueryBtn() {
+  let btn = document.getElementById('multi-query-btn');
+  if (selectedRags.length >= 2) {
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'multi-query-btn';
+      btn.className = 'btn-primary';
+      btn.style.cssText = 'margin-top:12px;width:100%';
+      btn.addEventListener('click', startMultiRagChat);
+      ragsDashboard.appendChild(btn);
+    }
+    btn.textContent = `Consultar ${selectedRags.length} RAGs selecionados`;
+  } else {
+    if (btn) btn.remove();
+  }
+}
+
+function startMultiRagChat() {
+  if (!apiKeyInput.value.trim()) {
+    showStatus('Insira sua API key antes de consultar.', 'error');
+    apiKeyInput.focus();
+    return;
+  }
+  if (selectedRags.length < 2) return;
+
+  // Use first RAG's provider (mixed providers not supported in a single query)
+  const aiType = selectedRags[0].provider;
+  const names = selectedRags.map(r => r.filename || r.store_id).join(', ');
+
+  session = {
+    apiKey: apiKeyInput.value.trim(),
+    aiType,
+    storeId: null,
+    storeIds: selectedRags.map(r => ({ store_id: r.store_id, name: r.filename || r.store_id, provider: r.provider })),
+  };
+
+  document.getElementById('r-filename').textContent = `Multi-RAG: ${names}`;
+  document.getElementById('r-provider').textContent = aiType === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
+  document.getElementById('r-store-id').textContent = selectedRags.map(r => r.store_id).join(', ');
+  document.getElementById('r-saved').textContent = '—';
+  resultPanel.classList.remove('hidden');
+
+  chatPanel.classList.remove('hidden');
+  chatBox.innerHTML = '';
+  addMessage(`Chat multi-RAG ativo com: ${names}. Faça uma pergunta!`, 'assistant');
+  chatPanel.scrollIntoView({ behavior: 'smooth' });
 }
 
 function openAddFilesDialog(rag) {
