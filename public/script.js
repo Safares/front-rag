@@ -408,7 +408,11 @@ async function sendQuestion() {
     });
     const data = await res.json();
     thinking.remove();
-    addMessage(data.error ? 'Erro: ' + data.error : data.answer, 'assistant');
+    addMessage(
+      data.error ? 'Erro: ' + data.error : (data.answer || data.error),
+      'assistant',
+      data.error ? [] : (data.citations || [])
+    );
   } catch (e) {
     thinking.remove();
     addMessage('Erro: ' + e.message, 'assistant');
@@ -418,10 +422,23 @@ async function sendQuestion() {
   questionInput.focus();
 }
 
-function addMessage(text, role) {
+function addMessage(text, role, citations = []) {
   const div = document.createElement('div');
-  div.className   = 'msg ' + role;
+  div.className = 'msg ' + role;
   div.textContent = text;
+
+  if (citations && citations.length > 0) {
+    const citDiv = document.createElement('div');
+    citDiv.className = 'msg-citations';
+    citations.forEach(c => {
+      const chip = document.createElement('span');
+      chip.className = 'citation-chip';
+      chip.textContent = c;
+      citDiv.appendChild(chip);
+    });
+    div.appendChild(citDiv);
+  }
+
   chatBox.appendChild(div);
   chatBox.scrollTop = chatBox.scrollHeight;
   return div;

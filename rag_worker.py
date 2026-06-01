@@ -300,7 +300,7 @@ def upload_openai(api_key: str, file_entries: list) -> dict:
             "files_uploaded": uploaded, "files_failed": failed}
 
 
-def query_openai(api_key: str, store_id: str, question: str) -> str:
+def query_openai(api_key: str, store_id: str, question: str) -> dict:
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
     response = client.responses.create(
@@ -308,7 +308,20 @@ def query_openai(api_key: str, store_id: str, question: str) -> str:
         input=question,
         tools=[{"type": "file_search", "vector_store_ids": [store_id]}],
     )
-    return response.output_text
+
+    # Extrair citations das annotations
+    citations = []
+    seen = set()
+    for item in response.output:
+        annotations = getattr(item, 'annotations', None) or []
+        for ann in annotations:
+            if getattr(ann, 'type', None) == 'file_citation':
+                fname = getattr(ann, 'filename', None) or getattr(ann, 'file_id', 'desconhecido')
+                if fname not in seen:
+                    seen.add(fname)
+                    citations.append(fname)
+
+    return {"answer": response.output_text, "citations": citations}
 
 
 # ─── Gemini ───────────────────────────────────────────────────
@@ -381,14 +394,17 @@ def upload_gemini(api_key: str, file_entries: list) -> dict:
             "files_uploaded": uploaded, "files_failed": failed}
 
 
-def query_gemini(api_key: str, store_name: str, question: str) -> str:
+def query_gemini(api_key: str, store_name: str, question: str) -> dict:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
+
+    prompt_with_citation = f"{question}\n\nAo final da resposta, liste as fontes usadas no formato:\n[Fontes: nome_do_arquivo_1, nome_do_arquivo_2]"
+
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=question,
+        contents=prompt_with_citation,
         config=types.GenerateContentConfig(
             tools=[
                 types.Tool(
@@ -399,7 +415,19 @@ def query_gemini(api_key: str, store_name: str, question: str) -> str:
             ]
         ),
     )
-    return response.text
+
+    text = response.text or ""
+    # Extrair citations do texto do Gemini
+    citations = []
+    import re as _re
+    match = _re.search(r'\[Fontes?:\s*([^\]]+)\]', text, _re.IGNORECASE)
+    if match:
+        raw = match.group(1)
+        citations = [c.strip() for c in raw.split(',') if c.strip()]
+        # Remover a linha de fontes do texto da resposta
+        text = text[:match.start()].rstrip()
+
+    return {"answer": text, "citations": citations}
 
 
 # ─── Web crawl ────────────────────────────────────────────────
@@ -798,10 +826,10 @@ def main():
 
     elif args.cmd == "query":
         try:
-            answer = query_openai(args.key, args.store, args.question) \
-                     if args.provider == "openai" \
-                     else query_gemini(args.key, args.store, args.question)
-            result({"answer": answer})
+            data = query_openai(args.key, args.store, args.question) \
+                   if args.provider == "openai" \
+                   else query_gemini(args.key, args.store, args.question)
+            result(data)
         except Exception as e:
             error(str(e))
 

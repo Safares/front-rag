@@ -479,3 +479,21 @@ header p { color: #888; margin-top: 8px; }
   transition: background .2s, border-color .2s;
 }
 .btn-use:hover { background: #1e1433; border-color: #7c3aed; }
+
+/* Citations */
+.msg-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.citation-chip {
+  background: rgba(139, 92, 246, 0.2);
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  color: #c084fc;
+  white-space: nowrap;
+}
