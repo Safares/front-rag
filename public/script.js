@@ -26,12 +26,22 @@ const questionInput = document.getElementById('question-input');
 const sendBtn       = document.getElementById('send-btn');
 const apiKeyInput   = document.getElementById('api_key');
 const copyBtn       = document.getElementById('copy-btn');
+const testPanel          = document.getElementById('test-panel');
+const testCsvInput       = document.getElementById('test-csv-input');
+const importCsvBtn       = document.getElementById('import-csv-btn');
+const addTestQuestionBtn = document.getElementById('add-test-question-btn');
+const testQuestionsList  = document.getElementById('test-questions-list');
+const runTestBtn         = document.getElementById('run-test-btn');
+const closeTestBtn       = document.getElementById('close-test-btn');
+const testProgressLog    = document.getElementById('test-progress-log');
+const testResults        = document.getElementById('test-results');
 
 let selectedFiles = [];
 let session = { apiKey: '', aiType: '', storeId: '', storeIds: null };
 let extractJobId = null;
 let lastQuestion  = '';
 let selectedRags = [];  // array of {store_id, provider, filename}
+let testRag = null;     // RAG currently being tested
 
 // ─── Abas ─────────────────────────────────────────────────────
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -767,11 +777,17 @@ async function loadRags() {
       addBtn.textContent = 'Adicionar';
       addBtn.addEventListener('click', () => openAddFilesDialog(rag));
 
+      const testBtn = document.createElement('button');
+      testBtn.className = 'btn-text';
+      testBtn.textContent = 'Testar';
+      testBtn.addEventListener('click', () => openTestPanel(rag));
+
       card.insertBefore(checkbox, card.firstChild);
       card.appendChild(nameEl);
       card.appendChild(metaEl);
       card.appendChild(useBtn);
       card.appendChild(addBtn);
+      card.appendChild(testBtn);
       ragsList.appendChild(card);
     });
   } catch {
@@ -906,6 +922,203 @@ function selectRag(rag) {
 }
 
 refreshRagsBtn.addEventListener('click', loadRags);
+
+// ─── Painel de Teste ──────────────────────────────────────────
+function openTestPanel(rag) {
+  testRag = rag;
+  testPanel.classList.remove('hidden');
+  testProgressLog.classList.add('hidden');
+  testProgressLog.innerHTML = '';
+  testResults.classList.add('hidden');
+  testResults.innerHTML = '';
+  testQuestionsList.innerHTML = '';
+  runTestBtn.disabled = true;
+  testPanel.scrollIntoView({ behavior: 'smooth' });
+}
+
+importCsvBtn.addEventListener('click', () => testCsvInput.click());
+
+testCsvInput.addEventListener('change', () => {
+  if (!testCsvInput.files.length) return;
+  const file = testCsvInput.files[0];
+  testCsvInput.value = '';
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const rows = parseTestCSV(e.target.result);
+    if (!rows.length) { showStatus('CSV sem perguntas válidas.', 'error'); return; }
+    rows.forEach(r => addTestRow(r.question, r.expected));
+  };
+  reader.readAsText(file, 'utf-8');
+});
+
+function parseTestCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  // Skip header row if it starts with "pergunta" (case-insensitive)
+  const start = lines[0].toLowerCase().startsWith('pergunta') ? 1 : 0;
+  return lines.slice(start).map(line => {
+    const cols = [];
+    let cur = '';
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; continue; }
+      if (c === ',' && !inQ) { cols.push(cur.trim()); cur = ''; continue; }
+      cur += c;
+    }
+    cols.push(cur.trim());
+    return { question: cols[0] || '', expected: cols[1] || '' };
+  }).filter(r => r.question);
+}
+
+addTestQuestionBtn.addEventListener('click', () => addTestRow('', ''));
+
+function addTestRow(question = '', expected = '') {
+  const row = document.createElement('div');
+  row.className = 'test-row';
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 1fr auto;gap:8px;margin-bottom:8px;align-items:center';
+
+  const qInput = document.createElement('input');
+  qInput.type = 'text';
+  qInput.placeholder = 'Pergunta';
+  qInput.value = question;
+  qInput.style.cssText = 'padding:8px;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:6px;font-size:0.85rem;width:100%;box-sizing:border-box';
+
+  const eInput = document.createElement('input');
+  eInput.type = 'text';
+  eInput.placeholder = 'Resposta esperada (opcional)';
+  eInput.value = expected;
+  eInput.style.cssText = 'padding:8px;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:6px;font-size:0.85rem;width:100%;box-sizing:border-box';
+
+  const removeBtn = document.createElement('button');
+  removeBtn.textContent = '×';
+  removeBtn.className = 'btn-text';
+  removeBtn.style.cssText = 'font-size:1.2rem;padding:0 6px';
+  removeBtn.addEventListener('click', () => { row.remove(); syncRunTestBtn(); });
+
+  qInput.addEventListener('input', syncRunTestBtn);
+
+  row.appendChild(qInput);
+  row.appendChild(eInput);
+  row.appendChild(removeBtn);
+  testQuestionsList.appendChild(row);
+  syncRunTestBtn();
+}
+
+function syncRunTestBtn() {
+  const hasQ = [...testQuestionsList.querySelectorAll('.test-row')].some(r => {
+    const inputs = r.querySelectorAll('input');
+    return inputs[0] && inputs[0].value.trim();
+  });
+  runTestBtn.disabled = !testRag || !hasQ;
+}
+
+runTestBtn.addEventListener('click', async () => {
+  if (!testRag) return;
+  const cases = [...testQuestionsList.querySelectorAll('.test-row')].map(r => {
+    const inputs = r.querySelectorAll('input');
+    return { question: inputs[0].value.trim(), expected: inputs[1].value.trim() };
+  }).filter(c => c.question);
+  if (!cases.length) return;
+
+  runTestBtn.disabled = true;
+  testProgressLog.innerHTML = '';
+  testProgressLog.classList.remove('hidden');
+  testResults.classList.add('hidden');
+  testResults.innerHTML = '';
+
+  const logTest = (msg) => {
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.textContent = msg;
+    testProgressLog.appendChild(div);
+    testProgressLog.scrollTop = testProgressLog.scrollHeight;
+  };
+
+  logTest(`Executando ${cases.length} teste(s) com o RAG "${testRag.filename || testRag.store_id}"...`);
+
+  try {
+    const res = await fetch(`/rags/${testRag.store_id}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKeyInput.value.trim(),
+        ai_type: testRag.provider,
+        cases,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) { logTest('Erro: ' + data.error); runTestBtn.disabled = false; return; }
+
+    const es = new EventSource(`/progress/${data.jobId}`);
+    es.addEventListener('progress', (e) => logTest(JSON.parse(e.data).message));
+    es.addEventListener('done', (e) => {
+      es.close();
+      renderTestResults(JSON.parse(e.data));
+      runTestBtn.disabled = false;
+    });
+    es.addEventListener('error', (e) => {
+      es.close();
+      let msg = 'Erro ao executar testes.';
+      try { msg = JSON.parse(e.data).error; } catch {}
+      logTest(msg);
+      runTestBtn.disabled = false;
+    });
+  } catch (e) {
+    logTest('Erro de conexão: ' + e.message);
+    runTestBtn.disabled = false;
+  }
+});
+
+function renderTestResults({ results, accuracy }) {
+  testResults.classList.remove('hidden');
+  testResults.innerHTML = '';
+
+  const passed = results.filter(r => r.verdict === 'pass').length;
+  const summary = document.createElement('div');
+  summary.style.cssText = 'font-size:1.05rem;font-weight:600;margin-bottom:12px;color:#c084fc';
+  summary.textContent = `Precisão: ${(accuracy * 100).toFixed(0)}% — ${passed}/${results.length} passaram`;
+  testResults.appendChild(summary);
+
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;border-collapse:collapse;font-size:0.82rem';
+
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  ['Pergunta', 'Esperado', 'Obtido', 'Veredicto'].forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    th.style.cssText = 'text-align:left;padding:8px;border-bottom:2px solid #4c1d95;color:#a78bfa;white-space:nowrap';
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  results.forEach(r => {
+    const pass = r.verdict === 'pass';
+    const tr = document.createElement('tr');
+    const vals = [r.question, r.expected || '—', r.answer, r.verdict];
+    vals.forEach((val, i) => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      td.style.cssText = 'padding:8px;border-bottom:1px solid #2d1b69;vertical-align:top';
+      if (i === 3) {
+        td.style.fontWeight = '600';
+        td.style.color = pass ? '#4ade80' : '#f87171';
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  testResults.appendChild(table);
+  testResults.scrollIntoView({ behavior: 'smooth' });
+}
+
+closeTestBtn.addEventListener('click', () => {
+  testPanel.classList.add('hidden');
+  testRag = null;
+});
 
 // Carregar RAGs na inicialização
 loadRags();

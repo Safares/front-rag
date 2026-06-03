@@ -152,6 +152,25 @@
       <button class="btn-copy" id="copy-api-key-btn">Copiar API Key</button>
     </section>
 
+    <!-- PAINEL DE TESTE DO RAG -->
+    <section class="card hidden" id="test-panel">
+      <h2 style="margin-bottom:12px">Testar RAG</h2>
+      <p style="font-size:0.85rem;opacity:0.7;margin-bottom:16px">
+        Importe um CSV com <code>pergunta,resposta_esperada</code> ou adicione perguntas manualmente.
+        O sistema usa LLM-as-judge para avaliar cada resposta.
+      </p>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <input type="file" id="test-csv-input" accept=".csv" hidden />
+        <button class="btn-text" id="import-csv-btn">Importar CSV</button>
+        <button class="btn-text" id="add-test-question-btn">+ Adicionar pergunta</button>
+      </div>
+      <div id="test-questions-list" style="margin-bottom:16px"></div>
+      <button class="btn-primary" id="run-test-btn" disabled>Executar testes</button>
+      <button class="btn-text" id="close-test-btn" style="margin-left:12px">Fechar</button>
+      <div id="test-progress-log" class="progress-log hidden" style="margin-top:12px"></div>
+      <div id="test-results" class="hidden" style="margin-top:16px"></div>
+    </section>
+
     <!-- CHAT -->
     <section class="card hidden" id="chat-panel">
       <div class="chat-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">

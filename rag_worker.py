@@ -925,6 +925,12 @@ def main():
     mq.add_argument("--stores-file", required=True, dest="stores_file")
     mq.add_argument("--question", required=True)
 
+    ts = sub.add_parser("test")
+    ts.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    ts.add_argument("--key", required=True)
+    ts.add_argument("--store", required=True)
+    ts.add_argument("--tests-file", required=True, dest="tests_file")
+
     args = parser.parse_args()
 
     if args.cmd == "upload":
@@ -1045,6 +1051,72 @@ def main():
 
             combined = "\n\n---\n\n".join(combined_parts)
             result({"answer": combined, "citations": all_citations})
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "test":
+        try:
+            with open(args.tests_file) as f:
+                tests = json.load(f)  # list of {"question": str, "expected": str}
+
+            results_list = []
+            total = len(tests)
+            correct = 0
+
+            for i, t in enumerate(tests, 1):
+                q   = t.get("question", "")
+                exp = t.get("expected", "")
+                progress(f"[{i}/{total}] Testando: {q[:80]}...")
+
+                try:
+                    got_data = query_openai(args.key, args.store, q) \
+                               if args.provider == "openai" \
+                               else query_gemini(args.key, args.store, q)
+                    got = got_data.get("answer", "")
+                except Exception as e:
+                    got = f"[Erro: {e}]"
+
+                # LLM judge
+                judge_prompt = (
+                    f"Pergunta: {q}\n\n"
+                    f"Resposta esperada: {exp}\n\n"
+                    f"Resposta obtida: {got}\n\n"
+                    "A resposta obtida responde corretamente à pergunta com base na resposta esperada? "
+                    "Responda APENAS com uma das palavras: sim, parcial ou não."
+                )
+                verdict = "não"
+                try:
+                    if args.provider == "openai":
+                        from openai import OpenAI
+                        client = OpenAI(api_key=args.key)
+                        resp = client.responses.create(model="gpt-4o-mini", input=judge_prompt)
+                        verdict_raw = resp.output_text.strip().lower()
+                    else:
+                        from google import genai
+                        client = genai.Client(api_key=args.key)
+                        resp = client.models.generate_content(model="gemini-2.0-flash", contents=judge_prompt)
+                        verdict_raw = (resp.text or "").strip().lower()
+
+                    if "sim" in verdict_raw:
+                        verdict = "sim"
+                    elif "parcial" in verdict_raw:
+                        verdict = "parcial"
+                    else:
+                        verdict = "não"
+                except Exception as e:
+                    verdict = f"erro-judge: {e}"
+
+                if verdict == "sim":
+                    correct += 1
+                elif verdict == "parcial":
+                    correct += 0.5
+
+                results_list.append({"question": q, "expected": exp, "got": got, "verdict": verdict})
+                progress(f"[{i}/{total}] Veredicto: {verdict}")
+
+            accuracy = round(correct / total * 100, 1) if total else 0
+            progress(f"Teste concluído: {accuracy}% de acerto em {total} perguntas.")
+            result({"results": results_list, "accuracy": accuracy, "total": total})
         except Exception as e:
             error(str(e))
 
