@@ -1067,12 +1067,10 @@ function selectRag(rag) {
   }
   session = { apiKey: getActiveApiKey(), aiType: rag.provider, storeId: rag.store_id };
 
+  setResultPanelMode('existing');
   document.getElementById('r-filename').textContent = rag.filename || '—';
   document.getElementById('r-provider').textContent = rag.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = rag.store_id;
-  document.getElementById('r-saved').textContent = `rags/${(rag.filename || 'rag').replace(/\.[^.]+$/, '')}.json`;
-  const apiKeyEl = document.getElementById('r-api-key');
-  if (apiKeyEl) apiKeyEl.textContent = rag.api_key || '—';
   resultPanel.classList.remove('hidden');
 
   chatPanel.classList.remove('hidden');
