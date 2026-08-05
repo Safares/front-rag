@@ -782,21 +782,35 @@ manualChatBtn.addEventListener('click', () => {
 const ragsDashboard  = document.getElementById('rags-dashboard');
 const ragsList       = document.getElementById('rags-list');
 const refreshRagsBtn = document.getElementById('refresh-rags-btn');
+const ragsSearchKeyInput = document.getElementById('rags-search-key');
+const ragsSearchBtn      = document.getElementById('rags-search-btn');
+let currentRagsKey = '';
 
-async function loadRags() {
+async function loadRags(apiKey) {
+  if (!apiKey) return;
+
   // Reset multi-RAG selection state
   selectedRags = [];
   const existingMultiBtn = document.getElementById('multi-query-btn');
   if (existingMultiBtn) existingMultiBtn.remove();
 
   try {
-    const res  = await fetch('/rags');
+    const res  = await fetch('/rags/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
     const rags = await res.json();
-    if (!Array.isArray(rags) || !rags.length) {
-      ragsDashboard.style.display = 'none';
+    if (!res.ok) {
+      showStatus(rags.error || 'Erro ao buscar RAGs.', 'error');
       return;
     }
-    ragsDashboard.style.display = '';
+    currentRagsKey = apiKey;
+    refreshRagsBtn.classList.remove('hidden');
+    if (!Array.isArray(rags) || !rags.length) {
+      ragsList.textContent = 'Nenhum RAG encontrado para essa API key.';
+      return;
+    }
     ragsList.innerHTML = '';
     rags.forEach(rag => {
       const card = document.createElement('div');
@@ -866,7 +880,7 @@ async function loadRags() {
       ragsList.appendChild(card);
     });
   } catch {
-    ragsDashboard.style.display = 'none';
+    showStatus('Erro de conexão ao buscar RAGs.', 'error');
   }
 }
 
@@ -956,7 +970,7 @@ async function addFilesToRag(rag, files) {
       es.close();
       const r = JSON.parse(e.data);
       showStatus(`${r.added} arquivo(s) adicionado(s) com sucesso ao RAG!`, 'success');
-      loadRags();
+      loadRags(currentRagsKey);
     });
     es.addEventListener('error', (e) => {
       es.close();
@@ -987,7 +1001,7 @@ function deleteRag(rag) {
     .then(data => {
       if (data.error) { showStatus(data.error, 'error'); return; }
       showStatus(`RAG "${label}" excluído com sucesso.`, 'success');
-      loadRags();
+      loadRags(currentRagsKey);
     })
     .catch(e => showStatus('Erro de conexão: ' + e.message, 'error'));
 }
@@ -1057,7 +1071,17 @@ function selectRag(rag) {
   chatPanel.scrollIntoView({ behavior: 'smooth' });
 }
 
-refreshRagsBtn.addEventListener('click', loadRags);
+refreshRagsBtn.addEventListener('click', () => loadRags(currentRagsKey));
+
+ragsSearchBtn.addEventListener('click', () => {
+  const key = ragsSearchKeyInput.value.trim();
+  if (!key) {
+    showStatus('Informe a API key para buscar seus RAGs.', 'error');
+    ragsSearchKeyInput.focus();
+    return;
+  }
+  loadRags(key);
+});
 
 // ─── Painel de Teste ──────────────────────────────────────────
 function openTestPanel(rag) {
@@ -1256,5 +1280,3 @@ closeTestBtn.addEventListener('click', () => {
   testRag = null;
 });
 
-// Carregar RAGs na inicialização
-loadRags();

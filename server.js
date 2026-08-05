@@ -55,6 +55,7 @@ if (process.env.DATABASE_URL) {
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS urls TEXT`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS schedule TEXT DEFAULT 'never'`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS scrape_ai_key TEXT`).catch(() => {});
+  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS creator_key_hash TEXT`).catch(() => {});
   db.query(`
     CREATE TABLE IF NOT EXISTS feedback (
       id         SERIAL PRIMARY KEY,
@@ -70,13 +71,17 @@ if (process.env.DATABASE_URL) {
   console.log('DATABASE_URL ausente — usando arquivos JSON locais.');
 }
 
+function hashCreatorKey(rawKey) {
+  return crypto.createHash('sha256').update(rawKey).digest('hex');
+}
+
 async function saveRag(data) {
   const apiKey = data.api_key || crypto.randomUUID();
   if (db) {
     await db.query(
-      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key, urls, schedule, scrape_ai_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key, urls, schedule, scrape_ai_key, creator_key_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
       [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0, apiKey,
-       JSON.stringify(data.urls || []), data.schedule || 'never', data.scrape_ai_key || null]
+       JSON.stringify(data.urls || []), data.schedule || 'never', data.scrape_ai_key || null, data.creator_key_hash || null]
     );
   } else {
     const stem    = path.parse(data.filename || 'rag').name;
@@ -86,10 +91,11 @@ async function saveRag(data) {
   return apiKey;
 }
 
-async function listRags() {
+async function listRags(creatorKeyHash) {
   if (db) {
     const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, file_count, schedule, created_at AS "createdAt" FROM rags ORDER BY created_at DESC'
+      'SELECT store_id, store_name, provider, filename, file_count, schedule, created_at AS "createdAt" FROM rags WHERE creator_key_hash = $1 ORDER BY created_at DESC',
+      [creatorKeyHash]
     );
     return rows;
   }
@@ -98,8 +104,8 @@ async function listRags() {
     return files
       .map(f => {
         try {
-          const { api_key: _k, scrape_ai_key: _s, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
-          return rag;
+          const { api_key: _k, scrape_ai_key: _s, creator_key_hash: keyHash, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
+          return keyHash === creatorKeyHash ? rag : null;
         } catch { return null; }
       })
       .filter(Boolean)
@@ -273,6 +279,7 @@ app.post('/upload', upload.array('files', 20), (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
+          r.creator_key_hash = hashCreatorKey(apiKey);
           saveRag(r).then(apiKey => {
             r.api_key = apiKey;
             const job = jobs.get(jobId);
@@ -550,6 +557,7 @@ app.post('/scrape', (req, res) => {
           r.file_count = r.files_uploaded?.length || 0;
           r.urls       = urls;
           r.schedule   = schedule;
+          r.creator_key_hash = hashCreatorKey(apiKey);
           if (schedule !== 'never') r.scrape_ai_key = apiKey;
           saveRag(r).then(ragApiKey => {
             r.api_key = ragApiKey;
@@ -595,9 +603,13 @@ app.post('/scrape', (req, res) => {
   });
 });
 
-// ─── GET /rags ────────────────────────────────────────────────
-app.get('/rags', async (_req, res) => {
-  try { res.json(await listRags()); } catch { res.json([]); }
+// ─── POST /rags/search ──────────────────────────────────────────
+app.post('/rags/search', async (req, res) => {
+  const { api_key: apiKey } = req.body || {};
+  if (!apiKey || typeof apiKey !== 'string') {
+    return res.status(400).json({ error: 'api_key é obrigatório.' });
+  }
+  try { res.json(await listRags(hashCreatorKey(apiKey))); } catch { res.json([]); }
 });
 
 async function updateRagFileCount(storeId, countDelta) {
@@ -1022,6 +1034,7 @@ app.post('/confirm-upload', async (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
+          r.creator_key_hash = hashCreatorKey(apiKey);
           saveRag(r).then(apiKey => {
             r.api_key = apiKey;
             const job = jobs.get(jobId);
