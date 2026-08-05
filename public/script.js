@@ -381,7 +381,18 @@ function listenProgress(jobId, onError) {
 }
 
 // ─── Resultado ────────────────────────────────────────────────
+// 'created': RAG novo (mostra onde foi salvo e a API key pública gerada).
+// 'existing': RAG já existente, só selecionado para uso — esses dois campos não existem aqui.
+function setResultPanelMode(mode) {
+  const isCreated = mode === 'created';
+  document.getElementById('result-header').textContent = isCreated ? 'RAG criado com sucesso!' : 'RAG selecionado';
+  document.getElementById('r-saved-row').classList.toggle('hidden', !isCreated);
+  document.getElementById('r-api-key-row').classList.toggle('hidden', !isCreated);
+  copyApiKeyBtn.classList.toggle('hidden', !isCreated);
+}
+
 function showResult(r) {
+  setResultPanelMode('created');
   document.getElementById('r-filename').textContent = r.filename || '—';
   document.getElementById('r-provider').textContent = r.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = r.store_id;
@@ -756,6 +767,7 @@ manualChatBtn.addEventListener('click', () => {
   const aiType = detectProviderFromStoreId(storeId);
   session = { apiKey, aiType, storeId };
 
+  setResultPanelMode('existing');
   document.getElementById('r-filename').textContent = storeId;
   document.getElementById('r-provider').textContent = aiType === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = storeId;
@@ -782,6 +794,12 @@ const refreshRagsBtn = document.getElementById('refresh-rags-btn');
 const ragsSearchKeyInput = document.getElementById('rags-search-key');
 const ragsSearchBtn      = document.getElementById('rags-search-btn');
 let currentRagsKey = '';
+
+// RAGs vindos do dashboard já foram encontrados com a key da busca — reusa ela
+// antes de exigir que o usuário digite de novo no campo de criar RAG.
+function getActiveApiKey() {
+  return currentRagsKey || apiKeyInput.value.trim();
+}
 
 async function loadRags(apiKey) {
   if (!apiKey) return;
@@ -899,7 +917,7 @@ function updateMultiQueryBtn() {
 }
 
 function startMultiRagChat() {
-  if (!apiKeyInput.value.trim()) {
+  if (!getActiveApiKey()) {
     showStatus('Insira sua API key antes de consultar.', 'error');
     apiKeyInput.focus();
     return;
@@ -911,16 +929,16 @@ function startMultiRagChat() {
   const names = selectedRags.map(r => r.filename || r.store_id).join(', ');
 
   session = {
-    apiKey: apiKeyInput.value.trim(),
+    apiKey: getActiveApiKey(),
     aiType,
     storeId: null,
     storeIds: selectedRags.map(r => ({ store_id: r.store_id, name: r.filename || r.store_id, provider: r.provider })),
   };
 
+  setResultPanelMode('existing');
   document.getElementById('r-filename').textContent = `Multi-RAG: ${names}`;
   document.getElementById('r-provider').textContent = aiType === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
   document.getElementById('r-store-id').textContent = selectedRags.map(r => r.store_id).join(', ');
-  document.getElementById('r-saved').textContent = '—';
   resultPanel.classList.remove('hidden');
 
   chatPanel.classList.remove('hidden');
@@ -930,7 +948,7 @@ function startMultiRagChat() {
 }
 
 function openAddFilesDialog(rag) {
-  if (!apiKeyInput.value.trim()) {
+  if (!getActiveApiKey()) {
     showStatus('Insira sua API key antes de adicionar arquivos.', 'error');
     apiKeyInput.focus();
     return;
@@ -953,7 +971,7 @@ async function addFilesToRag(rag, files) {
 
   const formData = new FormData();
   for (const file of files) formData.append('files', file);
-  formData.append('api_key', apiKeyInput.value.trim());
+  formData.append('api_key', getActiveApiKey());
   formData.append('ai_type', rag.provider);
 
   try {
@@ -981,7 +999,7 @@ async function addFilesToRag(rag, files) {
 }
 
 function deleteRag(rag) {
-  if (!apiKeyInput.value.trim()) {
+  if (!getActiveApiKey()) {
     showStatus('Insira sua API key da LLM antes de excluir.', 'error');
     apiKeyInput.focus();
     return;
@@ -992,19 +1010,19 @@ function deleteRag(rag) {
   fetch(`/rags/${rag.store_id}`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider: rag.provider, ai_key: apiKeyInput.value.trim() }),
+    body: JSON.stringify({ provider: rag.provider, ai_key: getActiveApiKey() }),
   })
     .then(res => res.json())
     .then(data => {
       if (data.error) { showStatus(data.error, 'error'); return; }
       showStatus(`RAG "${label}" excluído com sucesso.`, 'success');
-      loadRags(currentRagsKey);
+      if (currentRagsKey) loadRags(currentRagsKey);
     })
     .catch(e => showStatus('Erro de conexão: ' + e.message, 'error'));
 }
 
 function resetRagContent(rag) {
-  if (!apiKeyInput.value.trim()) {
+  if (!getActiveApiKey()) {
     showStatus('Insira sua API key da LLM antes de substituir o conteúdo.', 'error');
     apiKeyInput.focus();
     return;
@@ -1019,7 +1037,7 @@ function resetRagContent(rag) {
   fetch(`/rags/${rag.store_id}/clear`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ provider: rag.provider, ai_key: apiKeyInput.value.trim() }),
+    body: JSON.stringify({ provider: rag.provider, ai_key: getActiveApiKey() }),
   })
     .then(res => res.json())
     .then(data => {
@@ -1042,12 +1060,12 @@ function resetRagContent(rag) {
 }
 
 function selectRag(rag) {
-  if (!apiKeyInput.value.trim()) {
+  if (!getActiveApiKey()) {
     showStatus('Insira sua API key antes de usar um RAG existente.', 'error');
     apiKeyInput.focus();
     return;
   }
-  session = { apiKey: apiKeyInput.value.trim(), aiType: rag.provider, storeId: rag.store_id };
+  session = { apiKey: getActiveApiKey(), aiType: rag.provider, storeId: rag.store_id };
 
   document.getElementById('r-filename').textContent = rag.filename || '—';
   document.getElementById('r-provider').textContent = rag.provider === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
