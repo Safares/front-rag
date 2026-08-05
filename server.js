@@ -1,5 +1,7 @@
 'use strict';
 
+require('dotenv').config();
+
 const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
@@ -377,37 +379,66 @@ app.post('/query', (req, res) => {
       fs.unlink(storesFile, () => {});
       for (const line of out.split('\n')) {
         if (line.startsWith('RESULT:')) {
-          try { return res.json(JSON.parse(line.slice('RESULT:'.length))); } catch {}
+          try { 
+            return res.json(JSON.parse(line.slice('RESULT:'.length))); 
+          } catch (e) {
+            console.error('[ERROR] JSON parse failed (multi-query):', line.slice('RESULT:'.length).substring(0, 200), 'Error:', e.message);
+            return res.status(500).json({ error: 'Erro ao processar resposta: ' + e.message });
+          }
         }
         if (line.startsWith('ERROR:')) {
           return res.status(500).json({ error: line.slice('ERROR:'.length) });
         }
       }
+      console.error('[ERROR] Nenhum RESULT: ou ERROR: encontrado. Output:', out.substring(0, 500));
       res.status(500).json({ error: 'Resposta inesperada do worker.' });
     });
     return;
   }
 
   // Single RAG: existing behavior
+  const storeIdToUse = storeId || storeIds?.[0]?.store_id;
+  console.log(`[QUERY] storeId=${storeId}, storeIds=${storeIds?.length || 0}, final=${storeIdToUse}, provider=${aiType}, question=${question.substring(0, 50)}`);
+  
   const py = spawn('python', [
     workerPath, 'query',
     '--provider', aiType,
     '--key',      apiKey,
-    '--store',    storeId || storeIds?.[0]?.store_id,
+    '--store',    storeIdToUse,
     '--question', question,
   ]);
 
+  console.log(`[QUERY] Python spawned, PID=${py.pid}`);
+
   let out = '';
-  py.stdout.on('data', (d) => { out += d.toString(); });
+  py.stdout.on('data', (d) => { 
+    const chunk = d.toString();
+    console.log(`[QUERY STDOUT] ${chunk}`);
+    out += chunk; 
+  });
+  
+  py.stderr.on('data', (d) => {
+    console.error(`[QUERY STDERR] ${d.toString()}`);
+  });
+  
   py.on('close', () => {
+    console.log(`[QUERY] Process closed. Total output length: ${out.length}`);
     for (const line of out.split('\n')) {
       if (line.startsWith('RESULT:')) {
-        try { return res.json(JSON.parse(line.slice('RESULT:'.length))); } catch {}
+        try { 
+          console.log(`[QUERY] Found RESULT, parsing...`);
+          return res.json(JSON.parse(line.slice('RESULT:'.length))); 
+        } catch (e) {
+          console.error('[ERROR] JSON parse failed:', line.slice('RESULT:'.length).substring(0, 200), 'Error:', e.message);
+          return res.status(500).json({ error: 'Erro ao processar resposta: ' + e.message });
+        }
       }
       if (line.startsWith('ERROR:')) {
+        console.error(`[QUERY] Found ERROR: ${line.slice('ERROR:'.length)}`);
         return res.status(500).json({ error: line.slice('ERROR:'.length) });
       }
     }
+    console.error('[ERROR] Nenhum RESULT: ou ERROR: encontrado. Output:', out.substring(0, 500));
     res.status(500).json({ error: 'Resposta inesperada do worker.' });
   });
 });
@@ -591,6 +622,43 @@ async function updateRagFileCount(storeId, countDelta) {
   }
 }
 
+async function setRagFileCount(storeId, count) {
+  if (db) {
+    await db.query('UPDATE rags SET file_count = $1 WHERE store_id = $2', [count, storeId]);
+  } else {
+    const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      try {
+        const ragFile = path.join(RAGS_DIR, f);
+        const rag = JSON.parse(fs.readFileSync(ragFile, 'utf-8'));
+        if (rag.store_id === storeId) {
+          rag.file_count = count;
+          fs.writeFileSync(ragFile, JSON.stringify(rag, null, 2));
+          break;
+        }
+      } catch {}
+    }
+  }
+}
+
+async function deleteRagMetadata(storeId) {
+  const job = activeJobs.get(storeId);
+  if (job) { job.stop(); activeJobs.delete(storeId); }
+
+  if (db) {
+    await db.query('DELETE FROM rags WHERE store_id = $1', [storeId]);
+  } else {
+    const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      try {
+        const ragFile = path.join(RAGS_DIR, f);
+        const rag = JSON.parse(fs.readFileSync(ragFile, 'utf-8'));
+        if (rag.store_id === storeId) { fs.unlinkSync(ragFile); break; }
+      } catch {}
+    }
+  }
+}
+
 // ─── GET /rags/:storeId ───────────────────────────────────────
 app.get('/rags/:storeId', async (req, res) => {
   try {
@@ -698,6 +766,108 @@ app.post('/rags/:storeId/add', upload.array('files', 20), (req, res) => {
   });
 });
 
+// ─── DELETE /rags/:storeId — exclui o RAG (store no provedor + metadados locais)
+app.delete('/rags/:storeId', (req, res) => {
+  const { storeId } = req.params;
+  const { provider, ai_key: aiKey } = req.body || {};
+  if (!provider || !aiKey) {
+    return res.status(400).json({ error: 'provider e ai_key são obrigatórios.' });
+  }
+  if (typeof aiKey !== 'string' || aiKey.startsWith('-') || storeId.startsWith('-')) {
+    return res.status(400).json({ error: 'Parâmetros inválidos.' });
+  }
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'delete-rag',
+    '--provider', provider,
+    '--key',      aiKey,
+    '--store',    storeId,
+  ]);
+
+  let out = '';
+  py.stdout.on('data', (d) => { out += d.toString(); });
+  py.on('close', async () => {
+    for (const line of out.split('\n')) {
+      if (line.startsWith('RESULT:')) {
+        try {
+          await deleteRagMetadata(storeId);
+          return res.json(JSON.parse(line.slice('RESULT:'.length)));
+        } catch (e) {
+          return res.status(500).json({ error: 'RAG excluído no provedor, mas erro ao remover metadados locais: ' + e.message });
+        }
+      }
+      if (line.startsWith('ERROR:')) {
+        return res.status(500).json({ error: line.slice('ERROR:'.length) });
+      }
+    }
+    res.status(500).json({ error: 'Resposta inesperada do worker.' });
+  });
+});
+
+// ─── POST /rags/:storeId/clear — apaga o conteúdo do RAG, mantendo o store_id
+app.post('/rags/:storeId/clear', (req, res) => {
+  const { storeId } = req.params;
+  const { provider, ai_key: aiKey } = req.body || {};
+  if (!provider || !aiKey) {
+    return res.status(400).json({ error: 'provider e ai_key são obrigatórios.' });
+  }
+  if (typeof aiKey !== 'string' || aiKey.startsWith('-') || storeId.startsWith('-')) {
+    return res.status(400).json({ error: 'Parâmetros inválidos.' });
+  }
+
+  const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(20);
+  emitter.on('error', () => {}); // evita crash do processo se ninguém abriu /progress ainda (EventEmitter derruba o processo em 'error' sem listener)
+  jobs.set(jobId, { emitter, status: 'running', result: null, error: null });
+  res.json({ jobId });
+
+  const py = spawn('python', [
+    path.join(__dirname, 'rag_worker.py'), 'clear-rag',
+    '--provider', provider,
+    '--key',      aiKey,
+    '--store',    storeId,
+  ]);
+
+  let buf = '';
+  py.stdout.on('data', (data) => {
+    buf += data.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      if (t.startsWith('PROGRESS:')) emitter.emit('progress', t.slice('PROGRESS:'.length));
+      else if (t.startsWith('RESULT:')) {
+        try {
+          const r = JSON.parse(t.slice('RESULT:'.length));
+          setRagFileCount(storeId, 0).catch(e => console.error('Erro ao zerar file_count:', e.message));
+          const job = jobs.get(jobId);
+          job.result = r; job.status = 'done';
+          emitter.emit('done', r);
+        } catch (e) {
+          const job = jobs.get(jobId);
+          job.status = 'error'; job.error = e.message;
+          emitter.emit('error', e.message);
+        }
+      } else if (t.startsWith('ERROR:')) {
+        const msg = t.slice('ERROR:'.length);
+        const job = jobs.get(jobId);
+        job.status = 'error'; job.error = msg;
+        emitter.emit('error', msg);
+      }
+    }
+  });
+  py.stderr.on('data', (d) => { const m = d.toString().trim(); if (m) emitter.emit('progress', m); });
+  py.on('close', (code) => {
+    const job = jobs.get(jobId);
+    if (job && job.status === 'running') {
+      job.status = 'error'; job.error = `Processo encerrado com código ${code}.`;
+      emitter.emit('error', job.error);
+    }
+  });
+});
+
 // ─── POST /extract ────────────────────────────────────────────
 app.post('/extract', upload.array('files', 20), (req, res) => {
   const { api_key: apiKey, ai_type: aiType } = req.body;
@@ -725,7 +895,12 @@ app.post('/extract', upload.array('files', 20), (req, res) => {
     req.files.map((f, i) => ({ path: renamedPaths[i], name: f.originalname }))
   ));
 
-  const py = spawn('python', [workerPath, 'extract', '--files-file', filesManifest]);
+  const py = spawn('python', [
+    workerPath, 'extract',
+    '--files-file', filesManifest,
+    '--provider',   aiType,
+    '--key',        apiKey,
+  ]);
   let buf = '';
 
   py.stdout.on('data', (data) => {
@@ -748,7 +923,15 @@ app.post('/extract', upload.array('files', 20), (req, res) => {
           const job = jobs.get(jobId);
           job.result = r;
           job.status = 'done';
-          emitter.emit('done', { previews: r.previews.map(p => ({ name: p.name, preview: p.text.slice(0, 500) })), jobId });
+          emitter.emit('done', {
+            previews: r.previews.map(p => ({
+              name: p.name,
+              preview: p.text,
+              already_chunked: p.already_chunked,
+              chunk_note: p.chunk_note,
+            })),
+            jobId,
+          });
         } catch (e) {
           const job = jobs.get(jobId);
           job.status = 'error';
@@ -779,8 +962,8 @@ app.post('/extract', upload.array('files', 20), (req, res) => {
 // ─── POST /confirm-upload ─────────────────────────────────────
 app.post('/confirm-upload', async (req, res) => {
   const { extractJobId, edits, name } = req.body || {};
-  if (!extractJobId || !edits?.length) {
-    return res.status(400).json({ error: 'extractJobId e edits são obrigatórios.' });
+  if (!extractJobId || !Array.isArray(edits)) {
+    return res.status(400).json({ error: 'extractJobId é obrigatório e edits deve ser um array.' });
   }
 
   const extractJob = jobs.get(extractJobId);
@@ -804,6 +987,7 @@ app.post('/confirm-upload', async (req, res) => {
   const texts = originalPreviews.map(p => ({
     name: p.name,
     text: editMap[p.name] !== undefined ? editMap[p.name] : p.text,
+    already_chunked: p.already_chunked || false,
   }));
 
   const displayName = texts.length === 1
@@ -960,12 +1144,18 @@ app.post('/api/v1/query', async (req, res) => {
   py.on('close', () => {
     for (const line of out.split('\n')) {
       if (line.startsWith('RESULT:')) {
-        try { return res.json(JSON.parse(line.slice('RESULT:'.length))); } catch {}
+        try { 
+          return res.json(JSON.parse(line.slice('RESULT:'.length))); 
+        } catch (e) {
+          console.error('[ERROR] JSON parse failed (API v1):', line.slice('RESULT:'.length).substring(0, 200), 'Error:', e.message);
+          return res.status(500).json({ error: 'Erro ao processar resposta: ' + e.message });
+        }
       }
       if (line.startsWith('ERROR:')) {
         return res.status(500).json({ error: line.slice('ERROR:'.length) });
       }
     }
+    console.error('[ERROR] Nenhum RESULT: ou ERROR: encontrado (API v1). Output:', out.substring(0, 500));
     res.status(500).json({ error: 'Resposta inesperada do worker.' });
   });
 });

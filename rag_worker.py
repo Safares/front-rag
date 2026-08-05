@@ -7,6 +7,11 @@ Uso:
 """
 
 import sys
+import os
+os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
 import json
 import argparse
 import time
@@ -25,7 +30,11 @@ def progress(msg: str) -> None:
 
 
 def result(data: dict) -> None:
+    import sys
+    sys.stderr.flush()
+    sys.stdout.flush()
     _emit("RESULT:", data)
+    sys.stdout.flush()
 
 
 def error(msg: str) -> None:
@@ -245,6 +254,51 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
+# ─── Verificação de chunking via LLM ──────────────────────────
+
+CHUNK_CHECK_SAMPLE_CHARS = 15000
+
+
+def check_already_chunked(provider: str, api_key: str, text: str) -> dict:
+    """Pergunta à LLM se o texto já está bem dividido em chunks/seções,
+    para decidir se o chunk_text() automático deve ser pulado."""
+    if len(text) <= CHUNK_MAX_CHARS:
+        return {"already_chunked": True, "note": "Texto cabe em um único chunk (menos de 7000 caracteres)."}
+
+    sample = text[:CHUNK_CHECK_SAMPLE_CHARS]
+    prompt = (
+        "Você é um especialista em preparar textos para RAG (Retrieval-Augmented Generation).\n\n"
+        "Analise se o texto abaixo JÁ ESTÁ bem estruturado em chunks/seções (ex: cabeçalhos markdown, "
+        "separadores claros como \"---\", numeração de seções, blocos coerentes de tamanho razoável), "
+        "de forma que dividir automaticamente a cada ~7000 caracteres NÃO cortaria uma ideia no meio.\n\n"
+        "Responda EXATAMENTE neste formato, sem mais nada:\n"
+        "VEREDITO: SIM ou NAO\n"
+        "MOTIVO: <uma frase curta>\n\n"
+        "--- TEXTO (pode estar truncado) ---\n"
+        f"{sample}"
+    )
+
+    try:
+        if provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            resp = client.responses.create(model="gpt-4o-mini", input=prompt)
+            raw = resp.output_text.strip()
+        else:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            resp = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            raw = (resp.text or "").strip()
+
+        verdict_match = re.search(r"VEREDITO:\s*(SIM|NAO|N[ÃA]O)", raw, re.IGNORECASE)
+        motivo_match  = re.search(r"MOTIVO:\s*(.+)", raw, re.IGNORECASE)
+        already = bool(verdict_match) and verdict_match.group(1).upper().startswith("SIM")
+        note = motivo_match.group(1).strip() if motivo_match else raw[:200]
+        return {"already_chunked": already, "note": note}
+    except Exception as e:
+        return {"already_chunked": False, "note": f"Não foi possível verificar automaticamente ({e}); será dividido pelo método padrão."}
+
+
 # ─── OpenAI ───────────────────────────────────────────────────
 
 def upload_openai(api_key: str, file_entries: list) -> dict:
@@ -303,25 +357,50 @@ def upload_openai(api_key: str, file_entries: list) -> dict:
 def query_openai(api_key: str, store_id: str, question: str) -> dict:
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model="gpt-4o",
-        input=question,
-        tools=[{"type": "file_search", "vector_store_ids": [store_id]}],
-    )
+    
+    try:
+        progress(f"Consultando OpenAI com store: {store_id}")
+        response = client.beta.threads.runs.submit_tool_outputs(
+            model="gpt-4o",
+            tools=[{"type": "file_search", "vector_store_ids": [store_id]}],
+            messages=[{"role": "user", "content": question}]
+        )
+        text = ""
+        if hasattr(response, 'content'):
+            for item in response.content:
+                if hasattr(item, 'text'):
+                    text += item.text
+        progress(f"Resposta OpenAI recebida: {len(text)} caracteres")
+    except Exception as e:
+        progress(f"Erro ao usar API beta ({e}). Tentando chat completions...")
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": question}],
+            )
+            text = response.choices[0].message.content if response.choices else ""
+            progress(f"Resposta OpenAI (fallback): {len(text)} caracteres")
+        except Exception as e2:
+            progress(f"Erro no fallback também: {e2}")
+            text = f"[Erro ao gerar resposta: {str(e2)[:100]}]"
+
+    if not text or text.strip() == "":
+        text = "[Nenhuma resposta encontrada nos documentos]"
 
     # Extrair citations das annotations
     citations = []
     seen = set()
-    for item in response.output:
-        annotations = getattr(item, 'annotations', None) or []
-        for ann in annotations:
-            if getattr(ann, 'type', None) == 'file_citation':
-                fname = getattr(ann, 'filename', None) or getattr(ann, 'file_id', 'desconhecido')
-                if fname not in seen:
-                    seen.add(fname)
-                    citations.append(fname)
+    if hasattr(response, 'content'):
+        for item in response.content:
+            annotations = getattr(item, 'annotations', None) or []
+            for ann in annotations:
+                if getattr(ann, 'type', None) == 'file_citation':
+                    fname = getattr(ann, 'filename', None) or getattr(ann, 'file_id', 'desconhecido')
+                    if fname not in seen:
+                        seen.add(fname)
+                        citations.append(fname)
 
-    return {"answer": response.output_text, "citations": citations}
+    return {"answer": text.strip(), "citations": citations}
 
 
 # ─── Gemini ───────────────────────────────────────────────────
@@ -399,34 +478,68 @@ def query_gemini(api_key: str, store_name: str, question: str) -> dict:
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
-
+    
     prompt_with_citation = f"{question}\n\nAo final da resposta, liste as fontes usadas no formato:\n[Fontes: nome_do_arquivo_1, nome_do_arquivo_2]"
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt_with_citation,
-        config=types.GenerateContentConfig(
-            tools=[
-                types.Tool(
-                    file_search=types.FileSearch(
-                        file_search_store_names=[store_name]
+    
+    text = ""
+    progress(f"[DEBUG] Iniciando query_gemini com store_name={store_name}, question={question[:50]}...")
+    
+    try:
+        progress(f"[DEBUG] Tentando com file search...")
+        progress(f"[DEBUG] Store name being used: {store_name}")
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt_with_citation,
+            config=types.GenerateContentConfig(
+                tools=[
+                    types.Tool(
+                        file_search=types.FileSearch(
+                            file_search_store_names=[store_name]
+                        )
                     )
-                )
-            ]
-        ),
-    )
-
-    text = response.text or ""
-    # Extrair citations do texto do Gemini
+                ]
+            ),
+        )
+        
+        progress(f"[DEBUG] Response object: {response}")
+        progress(f"[DEBUG] Response.text exists: {hasattr(response, 'text')}")
+        if hasattr(response, 'text'):
+            progress(f"[DEBUG] Response.text value: {repr(response.text)}")
+        
+        text = response.text if hasattr(response, 'text') and response.text else ""
+        progress(f"[DEBUG] Resposta obtida: {len(text)} chars, conteúdo: {repr(text[:100])}")
+    except Exception as e:
+        progress(f"[DEBUG] Erro com file search: {type(e).__name__}: {str(e)}")
+        import traceback
+        progress(f"[DEBUG] Traceback: {traceback.format_exc()}")
+        try:
+            progress(f"[DEBUG] Tentando fallback sem file search...")
+            response = client.models.generate_content(
+                model="gemini-flash-latest",
+                contents=question
+            )
+            text = response.text if hasattr(response, 'text') and response.text else ""
+            progress(f"[DEBUG] Resposta fallback: {len(text)} chars")
+        except Exception as e2:
+            progress(f"[DEBUG] Erro fallback: {type(e2).__name__}: {str(e2)}")
+            text = f"[Erro: {str(e2)[:50]}]"
+    
+    if not text or text.strip() == "":
+        text = "[Nenhuma resposta - tente reformular a pergunta]"
+        progress(f"[DEBUG] Resposta estava vazia, usando placeholder")
+    
+    progress(f"[DEBUG] Text final: {len(text)} chars")
+    
+    # Extrair citations
     citations = []
     match = re.search(r'\[Fontes?:\s*([^\]]+)\]', text, re.IGNORECASE)
     if match:
         raw = match.group(1)
         citations = [c.strip() for c in raw.split(',') if c.strip()]
-        # Remover a linha de fontes do texto da resposta
         text = text[:match.start()].rstrip()
-
-    return {"answer": text, "citations": citations}
+    
+    progress(f"[DEBUG] Retornando resposta com {len(citations)} citations")
+    return {"answer": text.strip(), "citations": citations}
 
 
 # ─── Web crawl ────────────────────────────────────────────────
@@ -693,10 +806,14 @@ def _upload_texts_openai(api_key: str, texts: list, name: str) -> dict:
         fname = entry['name']
         text  = entry['text']
         try:
-            chunks = chunk_text(text)
+            if entry.get('already_chunked'):
+                chunks = [text]
+                progress(f"[{i}/{total}] {fname}: já está bem dividido, enviado como está (sem re-cortar).")
+            else:
+                chunks = chunk_text(text)
+                if len(chunks) > 1:
+                    progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
             stem   = Path(fname).stem
-            if len(chunks) > 1:
-                progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
             for n, chunk in enumerate(chunks, 1):
                 cname = f"{stem}_parte{n}.txt" if len(chunks) > 1 else f"{stem}.txt"
                 cbytes = chunk.encode("utf-8")
@@ -737,10 +854,14 @@ def _upload_texts_gemini(api_key: str, texts: list, name: str) -> dict:
         fname = entry['name']
         text  = entry['text']
         try:
-            chunks = chunk_text(text)
+            if entry.get('already_chunked'):
+                chunks = [text]
+                progress(f"[{i}/{total}] {fname}: já está bem dividido, enviado como está (sem re-cortar).")
+            else:
+                chunks = chunk_text(text)
+                if len(chunks) > 1:
+                    progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
             stem   = Path(fname).stem
-            if len(chunks) > 1:
-                progress(f"[{i}/{total}] {fname}: dividido em {len(chunks)} chunks.")
             for n, chunk in enumerate(chunks, 1):
                 cname  = _ascii_filename(f"{stem}_parte{n}.txt" if len(chunks) > 1 else f"{stem}.txt")
                 cbytes = chunk.encode("utf-8")
@@ -876,6 +997,66 @@ def add_files_gemini(api_key: str, store_name: str, file_entries: list) -> dict:
             "files_uploaded": uploaded, "files_failed": failed}
 
 
+# ─── Excluir RAG (store inteiro) ──────────────────────────────
+
+def delete_rag(provider: str, api_key: str, store_id: str) -> dict:
+    if provider == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        progress(f"Excluindo Vector Store {store_id}...")
+        client.vector_stores.delete(store_id)
+    else:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        progress(f"Excluindo File Search Store {store_id}...")
+        client.file_search_stores.delete(name=store_id, config=types.DeleteFileSearchStoreConfig(force=True))
+
+    progress("RAG excluído.")
+    return {"deleted": True, "store_id": store_id}
+
+
+# ─── Limpar conteúdo do RAG (mantém o store_id) ───────────────
+
+def clear_rag(provider: str, api_key: str, store_id: str) -> dict:
+    removed = 0
+
+    if provider == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        progress(f"Listando arquivos do Vector Store {store_id}...")
+        files = list(client.vector_stores.files.list(vector_store_id=store_id))
+        progress(f"{len(files)} arquivo(s) encontrado(s). Removendo...")
+        for f in files:
+            try:
+                client.vector_stores.files.delete(f.id, vector_store_id=store_id)
+                try:
+                    client.files.delete(f.id)
+                except Exception:
+                    pass  # objeto de arquivo já pode ter sido removido
+                removed += 1
+                progress(f"Removido: {f.id}")
+            except Exception as e:
+                progress(f"Erro ao remover {f.id}: {e}")
+    else:
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
+        progress(f"Listando documentos do File Search Store {store_id}...")
+        docs = list(client.file_search_stores.documents.list(parent=store_id))
+        progress(f"{len(docs)} documento(s) encontrado(s). Removendo...")
+        for d in docs:
+            try:
+                client.file_search_stores.documents.delete(name=d.name)
+                removed += 1
+                progress(f"Removido: {d.name}")
+            except Exception as e:
+                progress(f"Erro ao remover {d.name}: {e}")
+
+    progress(f"Conteúdo limpo: {removed} item(ns) removido(s).")
+    return {"cleared": True, "removed": removed, "store_id": store_id}
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -906,6 +1087,8 @@ def main():
 
     ex = sub.add_parser("extract")
     ex.add_argument("--files-file", required=True, dest="files_file")
+    ex.add_argument("--provider", choices=["openai", "gemini"], default=None)
+    ex.add_argument("--key", default=None)
 
     ut = sub.add_parser("upload-text")
     ut.add_argument("--provider", required=True, choices=["openai", "gemini"])
@@ -931,11 +1114,21 @@ def main():
     ts.add_argument("--store", required=True)
     ts.add_argument("--tests-file", required=True, dest="tests_file")
 
+    dl = sub.add_parser("delete-rag")
+    dl.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    dl.add_argument("--key", required=True)
+    dl.add_argument("--store", required=True)
+
+    cl = sub.add_parser("clear-rag")
+    cl.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    cl.add_argument("--key", required=True)
+    cl.add_argument("--store", required=True)
+
     args = parser.parse_args()
 
     if args.cmd == "upload":
         try:
-            with open(args.files_file) as f:
+            with open(args.files_file, encoding='utf-8') as f:
                 file_entries = json.load(f)
             data = upload_openai(args.key, file_entries) if args.provider == "openai" \
                    else upload_gemini(args.key, file_entries)
@@ -961,7 +1154,7 @@ def main():
 
     elif args.cmd == "scrape":
         try:
-            with open(args.urls_file) as f:
+            with open(args.urls_file, encoding='utf-8') as f:
                 urls = json.load(f)
             data = scrape_and_upload(args.key, args.provider, urls, args.name)
             result(data)
@@ -970,7 +1163,7 @@ def main():
 
     elif args.cmd == "extract":
         try:
-            with open(args.files_file) as f:
+            with open(args.files_file, encoding='utf-8') as f:
                 file_entries = json.load(f)
             previews = []
             for entry in file_entries:
@@ -980,7 +1173,16 @@ def main():
                 try:
                     content_bytes, _ = read_file_as_bytes(fp)
                     text = content_bytes.decode("utf-8", errors="replace")
-                    previews.append({"name": name, "text": text})
+                    preview = {"name": name, "text": text}
+
+                    if args.provider and args.key and fp.suffix.lower() in (".txt", ".md"):
+                        progress(f"Verificando divisão em chunks de {name}...")
+                        check = check_already_chunked(args.provider, args.key, text)
+                        preview["already_chunked"] = check["already_chunked"]
+                        preview["chunk_note"]      = check["note"]
+                        progress(f"{name}: {'já dividido em chunks' if check['already_chunked'] else 'será recortado automaticamente'} — {check['note']}")
+
+                    previews.append(preview)
                     progress(f"Extraído: {name} ({len(text)} chars)")
                 except Exception as e:
                     progress(f"Erro em {name}: {e}")
@@ -992,7 +1194,7 @@ def main():
 
     elif args.cmd == "upload-text":
         try:
-            with open(args.texts_file) as f:
+            with open(args.texts_file, encoding='utf-8') as f:
                 texts = json.load(f)  # lista de {"name": str, "text": str}
             data = _upload_texts_openai(args.key, texts, args.name) if args.provider == "openai" \
                    else _upload_texts_gemini(args.key, texts, args.name)
@@ -1002,7 +1204,7 @@ def main():
 
     elif args.cmd == "add":
         try:
-            with open(args.files_file) as f:
+            with open(args.files_file, encoding='utf-8') as f:
                 file_entries = json.load(f)
             data = add_files_openai(args.key, args.store, file_entries) if args.provider == "openai" \
                    else add_files_gemini(args.key, args.store, file_entries)
@@ -1012,7 +1214,7 @@ def main():
 
     elif args.cmd == "multi-query":
         try:
-            with open(args.stores_file) as f:
+            with open(args.stores_file, encoding='utf-8') as f:
                 stores = json.load(f)  # list of {"store_id": str, "name": str, "provider": str}
             import asyncio
 
@@ -1056,7 +1258,7 @@ def main():
 
     elif args.cmd == "test":
         try:
-            with open(args.tests_file) as f:
+            with open(args.tests_file, encoding='utf-8') as f:
                 tests = json.load(f)  # list of {"question": str, "expected": str}
 
             results_list = []
@@ -1094,7 +1296,7 @@ def main():
                     else:
                         from google import genai
                         client = genai.Client(api_key=args.key)
-                        resp = client.models.generate_content(model="gemini-2.0-flash", contents=judge_prompt)
+                        resp = client.models.generate_content(model="gemini-flash-latest", contents=judge_prompt)
                         verdict_raw = (resp.text or "").strip().lower()
 
                     if "sim" in verdict_raw:
@@ -1117,6 +1319,20 @@ def main():
             accuracy = round(correct / total * 100, 1) if total else 0
             progress(f"Teste concluído: {accuracy}% de acerto em {total} perguntas.")
             result({"results": results_list, "accuracy": accuracy, "total": total})
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "delete-rag":
+        try:
+            data = delete_rag(args.provider, args.key, args.store)
+            result(data)
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "clear-rag":
+        try:
+            data = clear_rag(args.provider, args.key, args.store)
+            result(data)
         except Exception as e:
             error(str(e))
 

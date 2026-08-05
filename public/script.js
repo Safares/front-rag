@@ -170,20 +170,31 @@ function showPreviewPanel(previews) {
     const label = document.createElement('div');
     label.style.cssText = 'font-weight:600;margin-bottom:6px;font-size:0.9rem';
     label.textContent = p.name;
+    item.appendChild(label);
+
+    if (p.already_chunked !== undefined) {
+      const badge = document.createElement('div');
+      badge.style.cssText = `margin-bottom:8px;padding:6px 10px;border-radius:6px;font-size:0.8rem;
+        background:${p.already_chunked ? 'rgba(74,222,128,0.12)' : 'rgba(251,191,36,0.12)'};
+        color:${p.already_chunked ? '#4ade80' : '#fbbf24'};
+        border:1px solid ${p.already_chunked ? '#4ade80' : '#fbbf24'}`;
+      badge.textContent = (p.already_chunked
+        ? '✓ Já dividido em chunks — será enviado como está. '
+        : '⚠ Será recortado automaticamente. ') + (p.chunk_note || '');
+      item.appendChild(badge);
+    }
 
     const textarea = document.createElement('textarea');
     textarea.className = 'preview-textarea';
     textarea.dataset.name = p.name;
     textarea.dataset.original = p.preview;
-    textarea.rows = 6;
-    textarea.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:8px;padding:10px;font-family:monospace;font-size:0.8rem;resize:vertical';
+    textarea.style.cssText = 'width:100%;height:600px;box-sizing:border-box;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c1d95;border-radius:8px;padding:10px;font-family:monospace;font-size:0.8rem;resize:vertical;overflow:auto';
     textarea.value = p.preview;
 
     const hint = document.createElement('small');
     hint.style.opacity = '0.6';
-    hint.textContent = 'Exibindo até 500 caracteres extraídos. Edite se necessário.';
+    hint.textContent = 'Confirme ou edite o texto antes de indexar.';
 
-    item.appendChild(label);
     item.appendChild(textarea);
     item.appendChild(hint);
     previewList.appendChild(item);
@@ -194,7 +205,12 @@ function showPreviewPanel(previews) {
 
 // ─── Confirmar e criar RAG (fase 2: upload) ───────────────────
 confirmBtn.addEventListener('click', async () => {
-  if (!extractJobId) return;
+  console.log('[CONFIRM] extractJobId:', extractJobId);
+  if (!extractJobId) { 
+    console.error('[CONFIRM] extractJobId está vazio!');
+    showStatus('Erro: Nenhum arquivo foi extraído. Tente fazer upload novamente.', 'error');
+    return;
+  }
   confirmBtn.disabled = true;
   hideStatus(); clearLog();
   progressLog.classList.remove('hidden');
@@ -204,17 +220,25 @@ confirmBtn.addEventListener('click', async () => {
     .filter(ta => ta.value !== ta.dataset.original)
     .map(ta => ({ name: ta.dataset.name, text: ta.value }));
 
+  console.log('[CONFIRM] edits:', edits.length, 'textareas found:', previewList.querySelectorAll('.preview-textarea').length);
+
   try {
+    const payload = { extractJobId, edits, name: selectedFiles[0]?.name };
+    console.log('[CONFIRM] Enviando:', JSON.stringify(payload).substring(0, 100));
+    
     const res  = await fetch('/confirm-upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ extractJobId, edits, name: selectedFiles[0]?.name }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
+    console.log('[CONFIRM] Response:', data);
+    
     if (data.error) { showStatus(data.error, 'error'); confirmBtn.disabled = false; return; }
     previewPanel.classList.add('hidden');
     listenProgress(data.jobId, () => { confirmBtn.disabled = false; });
   } catch (e) {
+    console.error('[CONFIRM] Exception:', e);
     showStatus('Erro de conexão: ' + e.message, 'error');
     confirmBtn.disabled = false;
   }
@@ -716,6 +740,44 @@ function sendFeedback(rating, msgEl, answerText) {
   msgEl.querySelector(`.feedback-btn[data-rating="${rating}"]`)?.classList.add('feedback-btn--chosen');
 }
 
+// ─── Chat manual (RAG existente por Store ID) ─────────────────
+const manualStoreIdInput = document.getElementById('manual-store-id');
+const manualApiKeyInput  = document.getElementById('manual-api-key');
+const manualChatBtn      = document.getElementById('manual-chat-btn');
+
+function getManualAiType() {
+  return document.querySelector('input[name="manual_ai_type"]:checked').value;
+}
+
+manualChatBtn.addEventListener('click', () => {
+  const storeId = manualStoreIdInput.value.trim();
+  const apiKey  = manualApiKeyInput.value.trim();
+  if (!storeId || !apiKey) {
+    showStatus('Informe o Store ID e a API key para abrir o chat.', 'error');
+    return;
+  }
+  const aiType = getManualAiType();
+  session = { apiKey, aiType, storeId };
+
+  document.getElementById('r-filename').textContent = storeId;
+  document.getElementById('r-provider').textContent = aiType === 'openai' ? 'OpenAI GPT' : 'Google Gemini';
+  document.getElementById('r-store-id').textContent = storeId;
+  document.getElementById('r-saved').textContent = '—';
+  const apiKeyEl = document.getElementById('r-api-key');
+  if (apiKeyEl) apiKeyEl.textContent = '—';
+  resultPanel.classList.remove('hidden');
+
+  chatPanel.classList.remove('hidden');
+  const existing = loadHistory(storeId);
+  if (existing.length > 0) {
+    renderHistory(storeId);
+  } else {
+    chatBox.innerHTML = '';
+    addMessage(`Chat conectado ao RAG "${storeId}". Faça uma pergunta!`, 'assistant');
+  }
+  chatPanel.scrollIntoView({ behavior: 'smooth' });
+});
+
 // ─── Dashboard de RAGs ────────────────────────────────────────
 const ragsDashboard  = document.getElementById('rags-dashboard');
 const ragsList       = document.getElementById('rags-list');
@@ -782,12 +844,25 @@ async function loadRags() {
       testBtn.textContent = 'Testar';
       testBtn.addEventListener('click', () => openTestPanel(rag));
 
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'btn-text';
+      resetBtn.textContent = 'Substituir conteúdo';
+      resetBtn.addEventListener('click', () => resetRagContent(rag));
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'btn-text';
+      deleteBtn.textContent = 'Excluir';
+      deleteBtn.style.color = '#f87171';
+      deleteBtn.addEventListener('click', () => deleteRag(rag));
+
       card.insertBefore(checkbox, card.firstChild);
       card.appendChild(nameEl);
       card.appendChild(metaEl);
       card.appendChild(useBtn);
       card.appendChild(addBtn);
       card.appendChild(testBtn);
+      card.appendChild(resetBtn);
+      card.appendChild(deleteBtn);
       ragsList.appendChild(card);
     });
   } catch {
@@ -892,6 +967,67 @@ async function addFilesToRag(rag, files) {
   } catch (e) {
     showStatus('Erro de conexão: ' + e.message, 'error');
   }
+}
+
+function deleteRag(rag) {
+  if (!apiKeyInput.value.trim()) {
+    showStatus('Insira sua API key da LLM antes de excluir.', 'error');
+    apiKeyInput.focus();
+    return;
+  }
+  const label = rag.filename || rag.store_id;
+  if (!confirm(`Tem certeza que deseja excluir permanentemente o RAG "${label}" (${rag.store_id})?\n\nEssa ação apaga o vector store no provedor e não pode ser desfeita.`)) return;
+
+  fetch(`/rags/${rag.store_id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: rag.provider, ai_key: apiKeyInput.value.trim() }),
+  })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) { showStatus(data.error, 'error'); return; }
+      showStatus(`RAG "${label}" excluído com sucesso.`, 'success');
+      loadRags();
+    })
+    .catch(e => showStatus('Erro de conexão: ' + e.message, 'error'));
+}
+
+function resetRagContent(rag) {
+  if (!apiKeyInput.value.trim()) {
+    showStatus('Insira sua API key da LLM antes de substituir o conteúdo.', 'error');
+    apiKeyInput.focus();
+    return;
+  }
+  const label = rag.filename || rag.store_id;
+  if (!confirm(`Isso vai apagar TODO o conteúdo atual do RAG "${label}" para você enviar arquivos novos no lugar, mantendo o mesmo Store ID.\n\nContinuar?`)) return;
+
+  clearLog();
+  progressLog.classList.remove('hidden');
+  appendLog(`Limpando conteúdo do RAG "${label}"...`);
+
+  fetch(`/rags/${rag.store_id}/clear`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: rag.provider, ai_key: apiKeyInput.value.trim() }),
+  })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) { showStatus(data.error, 'error'); return; }
+      const es = new EventSource(`/progress/${data.jobId}`);
+      es.addEventListener('progress', (e) => appendLog(JSON.parse(e.data).message));
+      es.addEventListener('done', () => {
+        es.close();
+        showStatus(`Conteúdo antigo removido. Selecione os arquivos novos para "${label}".`, 'success');
+        openAddFilesDialog(rag);
+      });
+      es.addEventListener('error', (e) => {
+        es.close();
+        let msg = 'Erro ao limpar conteúdo.';
+        try { msg = JSON.parse(e.data).error; } catch {}
+        showStatus(msg, 'error');
+      });
+    })
+    .catch(e => showStatus('Erro de conexão: ' + e.message, 'error'));
 }
 
 function selectRag(rag) {

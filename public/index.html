@@ -22,6 +22,35 @@
       <div id="rags-list" class="rags-list"></div>
     </section>
 
+    <!-- CHAT MANUAL (RAG EXISTENTE) -->
+    <section class="card" id="manual-chat-panel">
+      <h2 style="margin-bottom:12px">Testar RAG existente</h2>
+      <p style="font-size:0.85rem;opacity:0.7;margin-bottom:16px">
+        Informe o Store ID de um RAG já criado (mesmo que não apareça no dashboard acima) e a API key para abrir um chat e ver o que ele responde.
+      </p>
+      <div class="ai-selector">
+        <label class="ai-option" id="opt-manual-openai">
+          <input type="radio" name="manual_ai_type" value="openai" checked />
+          <span class="ai-icon">&#x1F916;</span>
+          <span>OpenAI GPT</span>
+        </label>
+        <label class="ai-option" id="opt-manual-gemini">
+          <input type="radio" name="manual_ai_type" value="gemini" />
+          <span class="ai-icon">&#x2728;</span>
+          <span>Google Gemini</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="manual-store-id">Store ID do RAG</label>
+        <input type="text" id="manual-store-id" placeholder="vs_... ou fileSearchStores/..." autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="manual-api-key">API Key / Token da LLM</label>
+        <input type="password" id="manual-api-key" placeholder="Cole sua chave aqui..." autocomplete="off" />
+      </div>
+      <button class="btn-primary" id="manual-chat-btn">Abrir chat</button>
+    </section>
+
     <!-- CONFIGURAÇÃO -->
     <section class="card" id="config-panel">
       <h2>1. Provedor</h2>
