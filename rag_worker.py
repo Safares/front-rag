@@ -1057,6 +1057,40 @@ def clear_rag(provider: str, api_key: str, store_id: str) -> dict:
     return {"cleared": True, "removed": removed, "store_id": store_id}
 
 
+# ─── Listar stores existentes na conta do provedor ────────────
+
+def list_stores(provider: str, api_key: str) -> dict:
+    stores = []
+
+    if provider == "openai":
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        for vs in client.vector_stores.list():
+            created_iso = None
+            if vs.created_at:
+                created_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(vs.created_at))
+            stores.append({
+                "store_id":   vs.id,
+                "store_name": vs.name,
+                "provider":   "openai",
+                "file_count": vs.file_counts.total if vs.file_counts else 0,
+                "createdAt":  created_iso,
+            })
+    else:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        for store in client.file_search_stores.list():
+            stores.append({
+                "store_id":   store.name,
+                "store_name": store.display_name or store.name,
+                "provider":   "gemini",
+                "file_count": store.active_documents_count or 0,
+                "createdAt":  store.create_time.isoformat() if store.create_time else None,
+            })
+
+    return {"stores": stores}
+
+
 # ─── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -1123,6 +1157,10 @@ def main():
     cl.add_argument("--provider", required=True, choices=["openai", "gemini"])
     cl.add_argument("--key", required=True)
     cl.add_argument("--store", required=True)
+
+    ls = sub.add_parser("list-stores")
+    ls.add_argument("--provider", required=True, choices=["openai", "gemini"])
+    ls.add_argument("--key", required=True)
 
     args = parser.parse_args()
 
@@ -1332,6 +1370,13 @@ def main():
     elif args.cmd == "clear-rag":
         try:
             data = clear_rag(args.provider, args.key, args.store)
+            result(data)
+        except Exception as e:
+            error(str(e))
+
+    elif args.cmd == "list-stores":
+        try:
+            data = list_stores(args.provider, args.key)
             result(data)
         except Exception as e:
             error(str(e))

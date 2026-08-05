@@ -17,6 +17,11 @@ const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSiz
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ─── Detecta o provedor pelo formato da API key (não há mais seletor manual) ──
+function detectProviderFromKey(apiKey) {
+  return apiKey.trim().startsWith('sk-') ? 'openai' : 'gemini';
+}
+
 // ─── Persistência: PostgreSQL ou arquivo JSON ─────────────────
 const RAGS_DIR = path.join(__dirname, 'rags');
 fs.mkdirSync(RAGS_DIR,                       { recursive: true });
@@ -55,7 +60,6 @@ if (process.env.DATABASE_URL) {
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS urls TEXT`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS schedule TEXT DEFAULT 'never'`).catch(() => {});
   db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS scrape_ai_key TEXT`).catch(() => {});
-  db.query(`ALTER TABLE rags ADD COLUMN IF NOT EXISTS creator_key_hash TEXT`).catch(() => {});
   db.query(`
     CREATE TABLE IF NOT EXISTS feedback (
       id         SERIAL PRIMARY KEY,
@@ -71,17 +75,13 @@ if (process.env.DATABASE_URL) {
   console.log('DATABASE_URL ausente — usando arquivos JSON locais.');
 }
 
-function hashCreatorKey(rawKey) {
-  return crypto.createHash('sha256').update(rawKey).digest('hex');
-}
-
 async function saveRag(data) {
   const apiKey = data.api_key || crypto.randomUUID();
   if (db) {
     await db.query(
-      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key, urls, schedule, scrape_ai_key, creator_key_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      'INSERT INTO rags (store_id, store_name, provider, filename, file_count, api_key, urls, schedule, scrape_ai_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
       [data.store_id, data.store_name, data.provider, data.filename, data.file_count || 0, apiKey,
-       JSON.stringify(data.urls || []), data.schedule || 'never', data.scrape_ai_key || null, data.creator_key_hash || null]
+       JSON.stringify(data.urls || []), data.schedule || 'never', data.scrape_ai_key || null]
     );
   } else {
     const stem    = path.parse(data.filename || 'rag').name;
@@ -89,28 +89,6 @@ async function saveRag(data) {
     fs.writeFileSync(ragFile, JSON.stringify({ ...data, api_key: apiKey, createdAt: new Date().toISOString() }, null, 2));
   }
   return apiKey;
-}
-
-async function listRags(creatorKeyHash) {
-  if (db) {
-    const { rows } = await db.query(
-      'SELECT store_id, store_name, provider, filename, file_count, schedule, created_at AS "createdAt" FROM rags WHERE creator_key_hash = $1 ORDER BY created_at DESC',
-      [creatorKeyHash]
-    );
-    return rows;
-  }
-  try {
-    const files = fs.readdirSync(RAGS_DIR).filter(f => f.endsWith('.json'));
-    return files
-      .map(f => {
-        try {
-          const { api_key: _k, scrape_ai_key: _s, creator_key_hash: keyHash, ...rag } = JSON.parse(fs.readFileSync(path.join(RAGS_DIR, f), 'utf-8'));
-          return keyHash === creatorKeyHash ? rag : null;
-        } catch { return null; }
-      })
-      .filter(Boolean)
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  } catch { return []; }
 }
 
 async function listRagsWithSchedule() {
@@ -279,7 +257,6 @@ app.post('/upload', upload.array('files', 20), (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
-          r.creator_key_hash = hashCreatorKey(apiKey);
           saveRag(r).then(apiKey => {
             r.api_key = apiKey;
             const job = jobs.get(jobId);
@@ -517,10 +494,11 @@ app.post('/crawl', (req, res) => {
 
 // ─── POST /scrape — scrapa páginas confirmadas e cria RAG ─────
 app.post('/scrape', (req, res) => {
-  const { urls, api_key: apiKey, ai_type: aiType, name, schedule = 'never' } = req.body || {};
-  if (!urls?.length || !apiKey || !aiType || !name) {
+  const { urls, api_key: apiKey, name, schedule = 'never' } = req.body || {};
+  if (!urls?.length || !apiKey || !name) {
     return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
   }
+  const aiType = detectProviderFromKey(apiKey);
 
   const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
   const emitter = new EventEmitter();
@@ -557,7 +535,6 @@ app.post('/scrape', (req, res) => {
           r.file_count = r.files_uploaded?.length || 0;
           r.urls       = urls;
           r.schedule   = schedule;
-          r.creator_key_hash = hashCreatorKey(apiKey);
           if (schedule !== 'never') r.scrape_ai_key = apiKey;
           saveRag(r).then(ragApiKey => {
             r.api_key = ragApiKey;
@@ -603,13 +580,57 @@ app.post('/scrape', (req, res) => {
   });
 });
 
-// ─── POST /rags/search ──────────────────────────────────────────
+// ─── Executa o worker uma vez e resolve com o RESULT: (sem streaming) ──
+function runWorkerOnce(args) {
+  return new Promise((resolve, reject) => {
+    const py = spawn('python', [path.join(__dirname, 'rag_worker.py'), ...args]);
+    let buf = '';
+    let settled = false;
+    py.stdout.on('data', (data) => {
+      buf += data.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t || settled) continue;
+        if (t.startsWith('RESULT:')) {
+          settled = true;
+          resolve(JSON.parse(t.slice('RESULT:'.length)));
+        } else if (t.startsWith('ERROR:')) {
+          settled = true;
+          reject(new Error(t.slice('ERROR:'.length)));
+        }
+      }
+    });
+    py.on('close', (code) => {
+      if (!settled) reject(new Error(`Processo encerrado com código ${code}.`));
+    });
+  });
+}
+
+// ─── POST /rags/search — consulta ao vivo nos provedores (não usa dados locais) ──
 app.post('/rags/search', async (req, res) => {
   const { api_key: apiKey } = req.body || {};
   if (!apiKey || typeof apiKey !== 'string') {
     return res.status(400).json({ error: 'api_key é obrigatório.' });
   }
-  try { res.json(await listRags(hashCreatorKey(apiKey))); } catch { res.json([]); }
+
+  const [openaiResult, geminiResult] = await Promise.allSettled([
+    runWorkerOnce(['list-stores', '--provider', 'openai', '--key', apiKey]),
+    runWorkerOnce(['list-stores', '--provider', 'gemini', '--key', apiKey]),
+  ]);
+
+  const stores = [
+    ...(openaiResult.status === 'fulfilled' ? openaiResult.value.stores : []),
+    ...(geminiResult.status === 'fulfilled' ? geminiResult.value.stores : []),
+  ];
+
+  if (openaiResult.status === 'rejected' && geminiResult.status === 'rejected') {
+    return res.status(401).json({ error: 'Não foi possível autenticar essa API key em nenhum provedor.' });
+  }
+
+  stores.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json(stores);
 });
 
 async function updateRagFileCount(storeId, countDelta) {
@@ -882,10 +903,11 @@ app.post('/rags/:storeId/clear', (req, res) => {
 
 // ─── POST /extract ────────────────────────────────────────────
 app.post('/extract', upload.array('files', 20), (req, res) => {
-  const { api_key: apiKey, ai_type: aiType } = req.body;
-  if (!req.files?.length || !apiKey || !aiType) {
+  const { api_key: apiKey } = req.body;
+  if (!req.files?.length || !apiKey) {
     return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
   }
+  const aiType = detectProviderFromKey(apiKey);
 
   const jobId   = Date.now().toString(36) + Math.random().toString(36).slice(2);
   const emitter = new EventEmitter();
@@ -1034,7 +1056,6 @@ app.post('/confirm-upload', async (req, res) => {
           const r = JSON.parse(t.slice('RESULT:'.length));
           r.filename   = displayName;
           r.file_count = r.files_uploaded?.length || 0;
-          r.creator_key_hash = hashCreatorKey(apiKey);
           saveRag(r).then(apiKey => {
             r.api_key = apiKey;
             const job = jobs.get(jobId);

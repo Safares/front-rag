@@ -38,18 +38,6 @@
       <p style="font-size:0.85rem;opacity:0.7;margin-bottom:16px">
         Informe o Store ID de um RAG já criado (mesmo que não apareça no dashboard acima) e a API key para abrir um chat e ver o que ele responde.
       </p>
-      <div class="ai-selector">
-        <label class="ai-option" id="opt-manual-openai">
-          <input type="radio" name="manual_ai_type" value="openai" checked />
-          <span class="ai-icon">&#x1F916;</span>
-          <span>OpenAI GPT</span>
-        </label>
-        <label class="ai-option" id="opt-manual-gemini">
-          <input type="radio" name="manual_ai_type" value="gemini" />
-          <span class="ai-icon">&#x2728;</span>
-          <span>Google Gemini</span>
-        </label>
-      </div>
       <div class="field">
         <label for="manual-store-id">Store ID do RAG</label>
         <input type="text" id="manual-store-id" placeholder="vs_... ou fileSearchStores/..." autocomplete="off" />
@@ -63,19 +51,10 @@
 
     <!-- CONFIGURAÇÃO -->
     <section class="card" id="config-panel">
-      <h2>1. Provedor</h2>
-      <div class="ai-selector">
-        <label class="ai-option" id="opt-openai">
-          <input type="radio" name="ai_type" value="openai" checked />
-          <span class="ai-icon">&#x1F916;</span>
-          <span>OpenAI GPT</span>
-        </label>
-        <label class="ai-option" id="opt-gemini">
-          <input type="radio" name="ai_type" value="gemini" />
-          <span class="ai-icon">&#x2728;</span>
-          <span>Google Gemini</span>
-        </label>
-      </div>
+      <h2>1. API Key</h2>
+      <p style="font-size:0.85rem;opacity:0.7;margin-bottom:12px">
+        O provedor (OpenAI ou Gemini) é detectado automaticamente pelo formato da key.
+      </p>
 
       <div class="field">
         <label for="api_key">API Key / Token</label>

@@ -115,7 +115,6 @@ urlInput.addEventListener('input', checkUrlReady);
 
 function checkFileReady() { uploadBtn.disabled = !(selectedFiles.length > 0 && apiKeyInput.value.trim()); }
 function checkUrlReady()  { scanBtn.disabled   = !(urlInput.value.trim() && apiKeyInput.value.trim()); }
-function getAiType()      { return document.querySelector('input[name="ai_type"]:checked').value; }
 function getDepth()  { return Number(document.querySelector('input[name="depth"]:checked').value); }
 function getUseJs()      { return document.getElementById('use-js').checked; }
 function getScrapeSchedule() { return document.querySelector('input[name="scrape_schedule"]:checked')?.value || 'never'; }
@@ -132,7 +131,6 @@ uploadBtn.addEventListener('click', async () => {
   const formData = new FormData();
   for (const file of selectedFiles) formData.append('files', file);
   formData.append('api_key', apiKeyInput.value.trim());
-  formData.append('ai_type', getAiType());
 
   try {
     const res  = await fetch('/extract', { method: 'POST', body: formData });
@@ -346,7 +344,6 @@ scrapeBtn.addEventListener('click', async () => {
       body: JSON.stringify({
         urls,
         api_key: apiKeyInput.value.trim(),
-        ai_type: getAiType(),
         name,
         schedule: getScrapeSchedule(),
       }),
@@ -745,8 +742,8 @@ const manualStoreIdInput = document.getElementById('manual-store-id');
 const manualApiKeyInput  = document.getElementById('manual-api-key');
 const manualChatBtn      = document.getElementById('manual-chat-btn');
 
-function getManualAiType() {
-  return document.querySelector('input[name="manual_ai_type"]:checked').value;
+function detectProviderFromStoreId(storeId) {
+  return storeId.startsWith('fileSearchStores/') ? 'gemini' : 'openai';
 }
 
 manualChatBtn.addEventListener('click', () => {
@@ -756,7 +753,7 @@ manualChatBtn.addEventListener('click', () => {
     showStatus('Informe o Store ID e a API key para abrir o chat.', 'error');
     return;
   }
-  const aiType = getManualAiType();
+  const aiType = detectProviderFromStoreId(storeId);
   session = { apiKey, aiType, storeId };
 
   document.getElementById('r-filename').textContent = storeId;

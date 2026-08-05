@@ -49,27 +49,6 @@ header p { color: #888; margin-top: 8px; }
 }
 
 /* AI Selector */
-.ai-selector { display: flex; gap: 12px; margin-bottom: 20px; }
-
-.ai-option {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 18px;
-  border: 2px solid #2a2a38;
-  border-radius: 12px;
-  cursor: pointer;
-  transition: all .2s;
-  user-select: none;
-}
-
-.ai-option input[type="radio"] { display: none; }
-
-.ai-option:has(input:checked) { border-color: #7c3aed; background: #1e1433; }
-.ai-option:hover { border-color: #4a4a68; }
-.ai-icon { font-size: 1.3rem; }
-
 /* Field */
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: .85rem; color: #888; }
