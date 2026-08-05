@@ -10,6 +10,8 @@ const crypto  = require('crypto');
 const { spawn }        = require('child_process');
 const { EventEmitter } = require('events');
 const cron             = require('node-cron');
+const dns              = require('dns').promises;
+const net              = require('net');
 
 const app    = express();
 const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 100 * 1024 * 1024 } });
@@ -29,6 +31,42 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ─── Detecta o provedor pelo formato da API key (não há mais seletor manual) ──
 function detectProviderFromKey(apiKey) {
   return apiKey.trim().startsWith('sk-') ? 'openai' : 'gemini';
+}
+
+// ─── Bloqueia SSRF: rejeita URLs que resolvem para IP interno/privado ──
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 127 || a === 10 || a === 0 ||
+           (a === 172 && b >= 16 && b <= 31) ||
+           (a === 192 && b === 168) ||
+           (a === 169 && b === 254);
+  }
+  if (net.isIPv6(ip)) {
+    const lower = ip.toLowerCase();
+    const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4 mapeado em IPv6
+    if (mapped) return isPrivateIp(mapped[1]);
+    return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80');
+  }
+  return true; // formato desconhecido: bloqueia por segurança
+}
+
+async function assertPublicUrl(urlStr) {
+  let parsed;
+  try { parsed = new URL(urlStr); } catch { throw new Error('URL inválida.'); }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Apenas URLs http/https são permitidas.');
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  if (hostname === 'localhost') throw new Error('URL não permitida (endereço local).');
+
+  let addrs;
+  try { addrs = await dns.lookup(hostname, { all: true }); }
+  catch { throw new Error('Não foi possível resolver o hostname da URL.'); }
+  if (addrs.some(a => isPrivateIp(a.address))) {
+    throw new Error('URL aponta para um endereço interno/privado, não permitido.');
+  }
+  return hostname;
 }
 
 // ─── Persistência: PostgreSQL ou arquivo JSON ─────────────────
@@ -1244,7 +1282,7 @@ app.post('/api/v1/query', async (req, res) => {
 });
 
 // ─── POST /api/v1/rags — cria um RAG a partir de uma URL (assíncrono) ──
-app.post('/api/v1/rags', (req, res) => {
+app.post('/api/v1/rags', async (req, res) => {
   const { url, ai_key: aiKey, name, depth = 2, use_js: useJs = false, schedule = 'never' } = req.body || {};
   if (!url || !aiKey) {
     return res.status(400).json({ error: 'Campos obrigatórios: url, ai_key' });
@@ -1255,16 +1293,20 @@ app.post('/api/v1/rags', (req, res) => {
   if (typeof url !== 'string' || url.startsWith('-')) {
     return res.status(400).json({ error: 'Formato de url inválido.' });
   }
+  if (name !== undefined && (typeof name !== 'string' || !/^[A-Za-z0-9._ -]{1,64}$/.test(name) || name.startsWith('-'))) {
+    return res.status(400).json({ error: 'name inválido (use apenas letras, números, espaço, ponto, hífen e underscore, até 64 caracteres).' });
+  }
   if (!checkRateLimit(aiKey)) {
     return res.status(429).json({ error: 'Rate limit excedido. Máximo: 60 requisições/minuto.' });
   }
 
   let hostname;
-  try { hostname = new URL(url).hostname; } catch { return res.status(400).json({ error: 'URL inválida.' }); }
+  try { hostname = await assertPublicUrl(url); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
 
   const provider = detectProviderFromKey(aiKey);
   const ragName  = name || hostname;
-  const jobId    = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  const jobId    = crypto.randomBytes(24).toString('hex');
   jobs.set(jobId, { emitter: new EventEmitter(), status: 'running', stage: 'crawling', result: null, error: null });
 
   res.status(202).json({ job_id: jobId });
