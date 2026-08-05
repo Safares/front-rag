@@ -1142,6 +1142,46 @@ app.get('/api/docs', (_req, res) => {
           },
         },
       },
+      '/api/v1/rags': {
+        post: {
+          summary: 'Cria um RAG a partir de uma URL (crawling + scraping + upload assíncrono)',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['url', 'ai_key'],
+                  properties: {
+                    url:      { type: 'string', example: 'https://docs.exemplo.com' },
+                    ai_key:   { type: 'string', example: 'sk-... ou key do Gemini' },
+                    name:     { type: 'string', example: 'docs-exemplo (opcional, padrão: hostname da url)' },
+                    depth:    { type: 'integer', example: 2, description: '0 = sem limite de profundidade no crawling' },
+                    use_js:   { type: 'boolean', example: false, description: 'Renderizar JS antes de extrair (sites dinâmicos)' },
+                    schedule: { type: 'string', enum: ['never', 'daily', 'weekly'], example: 'never' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            202: { description: 'Job aceito, criação rodando em background', content: { 'application/json': { schema: { type: 'object', properties: { job_id: { type: 'string' } } } } } },
+            400: { description: 'Campos obrigatórios ausentes ou inválidos' },
+            429: { description: 'Rate limit exceeded' },
+          },
+        },
+      },
+      '/api/v1/rags/{jobId}': {
+        get: {
+          summary: 'Consulta o status/resultado da criação assíncrona de um RAG',
+          parameters: [{ name: 'jobId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: { description: 'running | done', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['running', 'done'] }, stage: { type: 'string' }, store_id: { type: 'string' }, provider: { type: 'string' }, file_count: { type: 'integer' }, api_key: { type: 'string' } } } } } },
+            404: { description: 'Job não encontrado' },
+            500: { description: 'Erro durante a criação' },
+          },
+        },
+      },
     },
     components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } },
   });
@@ -1200,6 +1240,92 @@ app.post('/api/v1/query', async (req, res) => {
     }
     console.error('[ERROR] Nenhum RESULT: ou ERROR: encontrado (API v1). Output:', out.substring(0, 500));
     res.status(500).json({ error: 'Resposta inesperada do worker.' });
+  });
+});
+
+// ─── POST /api/v1/rags — cria um RAG a partir de uma URL (assíncrono) ──
+app.post('/api/v1/rags', (req, res) => {
+  const { url, ai_key: aiKey, name, depth = 2, use_js: useJs = false, schedule = 'never' } = req.body || {};
+  if (!url || !aiKey) {
+    return res.status(400).json({ error: 'Campos obrigatórios: url, ai_key' });
+  }
+  if (typeof aiKey !== 'string' || aiKey.startsWith('-')) {
+    return res.status(400).json({ error: 'Formato de ai_key inválido.' });
+  }
+  if (typeof url !== 'string' || url.startsWith('-')) {
+    return res.status(400).json({ error: 'Formato de url inválido.' });
+  }
+  if (!checkRateLimit(aiKey)) {
+    return res.status(429).json({ error: 'Rate limit excedido. Máximo: 60 requisições/minuto.' });
+  }
+
+  let hostname;
+  try { hostname = new URL(url).hostname; } catch { return res.status(400).json({ error: 'URL inválida.' }); }
+
+  const provider = detectProviderFromKey(aiKey);
+  const ragName  = name || hostname;
+  const jobId    = Date.now().toString(36) + Math.random().toString(36).slice(2);
+  jobs.set(jobId, { emitter: new EventEmitter(), status: 'running', stage: 'crawling', result: null, error: null });
+
+  res.status(202).json({ job_id: jobId });
+
+  (async () => {
+    const job = jobs.get(jobId);
+    let urlsFile;
+    try {
+      const crawlArgs = ['crawl', '--url', url, '--depth', String(depth)];
+      if (useJs) crawlArgs.push('--js');
+      const crawlResult = await runWorkerOnce(crawlArgs);
+      const urls = (crawlResult.pages || []).map(p => p.url);
+      if (!urls.length) throw new Error('Nenhuma página encontrada para esse site.');
+
+      job.stage = 'uploading';
+      urlsFile = path.join(__dirname, 'uploads', `urls_${jobId}.json`);
+      fs.writeFileSync(urlsFile, JSON.stringify(urls));
+
+      const scrapeResult = await runWorkerOnce([
+        'scrape', '--provider', provider, '--key', aiKey,
+        '--urls-file', urlsFile, '--name', ragName,
+      ]);
+      scrapeResult.filename   = ragName;
+      scrapeResult.file_count = scrapeResult.files_uploaded?.length || 0;
+      scrapeResult.urls       = urls;
+      scrapeResult.schedule   = schedule;
+      if (schedule !== 'never') scrapeResult.scrape_ai_key = aiKey;
+
+      const ragApiKey = await saveRag(scrapeResult);
+      scrapeResult.api_key = ragApiKey;
+      if (schedule !== 'never') {
+        const cronJob = scheduleCronForRag({ ...scrapeResult, api_key: ragApiKey });
+        if (cronJob) activeJobs.set(scrapeResult.store_id, cronJob);
+      }
+
+      job.status = 'done';
+      job.result = scrapeResult;
+    } catch (e) {
+      job.status = 'error';
+      job.error  = e.message;
+    } finally {
+      if (urlsFile) fs.unlink(urlsFile, () => {});
+    }
+  })();
+});
+
+// ─── GET /api/v1/rags/:jobId — status da criação assíncrona ────
+app.get('/api/v1/rags/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'job não encontrado.' });
+
+  if (job.status === 'running') return res.json({ status: 'running', stage: job.stage });
+  if (job.status === 'error')   return res.status(500).json({ status: 'error', error: job.error });
+
+  res.json({
+    status:     'done',
+    store_id:   job.result.store_id,
+    store_name: job.result.store_name,
+    provider:   job.result.provider,
+    file_count: job.result.file_count,
+    api_key:    job.result.api_key,
   });
 });
 

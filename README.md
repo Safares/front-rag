@@ -5,15 +5,20 @@ Ferramenta local para criar, testar e gerenciar bases de conhecimento RAG (Retri
 ## O que o projeto faz
 
 - **Cria RAGs** a partir de arquivos (`.txt`, `.md`, `.pdf`, `.xlsx`, `.xls`, `.csv`, `.docx`, `.pptx`) ou de um site (crawling + scraping de páginas).
+- O provedor (**OpenAI** ou **Gemini**) é **detectado automaticamente** pelo formato da API key informada (`sk-...` → OpenAI, senão Gemini) — não existe mais seletor manual em nenhuma tela.
 - Antes de indexar, mostra um **preview do texto extraído** para revisão/edição manual.
 - Para arquivos `.txt`/`.md`, usa a própria LLM (com a API key informada) para **verificar se o texto já está bem dividido em chunks** — se estiver, envia como está; senão, aplica o recorte automático por tamanho de caractere.
 - Delega toda a indexação vetorial para os serviços gerenciados dos provedores: **Vector Stores da OpenAI** e **File Search Stores do Gemini** (não há banco vetorial próprio).
+- **Dashboard de RAGs por API key**: informe a API key da OpenAI/Gemini e o app consulta ao vivo os vector stores/file search stores daquela conta nos dois provedores — não depende de nada salvo localmente para listar.
 - Permite **conversar (chat)** com um RAG específico ou com vários RAGs ao mesmo tempo (multi-RAG), com histórico salvo no navegador, exportação em Markdown/PDF e feedback (👍/👎).
-- Painel para **testar um RAG existente por Store ID** manualmente (sem precisar que ele apareça no dashboard local) — útil para RAGs criados em outra máquina/ambiente.
+- Painel para **testar um RAG existente por Store ID** manualmente (sem precisar que ele apareça no dashboard) — útil para RAGs criados em outra máquina/ambiente.
 - Permite **adicionar arquivos** a um RAG já existente, **excluir um RAG** (apaga o vector store no provedor) e **substituir todo o conteúdo de um RAG mantendo o mesmo Store ID** (limpa os documentos indexados e permite subir arquivos novos no lugar).
 - Painel de teste em lote com **LLM-as-judge** para avaliar a precisão das respostas de um RAG.
-- **API pública REST** (`/api/v1/query`) autenticada por `api_key` própria de cada RAG, com rate limit.
-- **Re-scraping automático agendado** (diário/semanal) para RAGs criados a partir de URLs.
+- **API pública REST**:
+  - `POST /api/v1/query` — consulta um RAG já existente, autenticada por `api_key` própria de cada RAG, com rate limit.
+  - `POST /api/v1/rags` — **cria um RAG a partir de uma URL** (crawling + scraping + chunking + upload) de forma assíncrona: recebe `url` e `ai_key` no corpo, responde `202` com um `job_id`, e `GET /api/v1/rags/:jobId` é usado para consultar o status/resultado (`running` → `done`/`error`, com `store_id` no resultado final).
+- **Re-scraping automático agendado** (diário/semanal) para RAGs criados a partir de URLs (via UI ou via `POST /api/v1/rags` com `schedule`).
+- Cada requisição HTTP é logada no terminal do servidor (método, rota, status, tempo de resposta).
 
 ## Arquitetura
 
@@ -84,4 +89,4 @@ package.json       → dependências e script Node
 
 ## Segurança
 
-Este projeto foi feito para uso local/interno. O dashboard de RAGs não exige autenticação para listar ou operar sobre bases existentes — quem tiver acesso à interface e à API key do provedor consegue consultar, adicionar conteúdo, excluir ou substituir o conteúdo de qualquer RAG listado. Não exponha esta aplicação diretamente à internet sem adicionar uma camada de autenticação.
+Este projeto foi feito para uso local/interno. O dashboard de RAGs só lista os vector stores/file search stores de quem souber a API key da OpenAI/Gemini usada para criá-los — mas quem tiver essa key consegue listar, consultar, adicionar conteúdo, excluir ou substituir o conteúdo de qualquer RAG daquela conta pelo dashboard. Não exponha esta aplicação diretamente à internet sem adicionar uma camada de autenticação própria (login, proxy autenticado, etc.).
