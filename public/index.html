@@ -22,12 +22,12 @@
       <p style="font-size:0.85rem;opacity:0.7;margin-bottom:16px">
         Informe a API key da OpenAI/Gemini que você usou para criar seus RAGs — só os que foram criados com essa key aparecem aqui.
       </p>
-      <div class="field" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:16px">
-        <div style="flex:1">
+      <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:16px">
+        <div class="field" style="flex:1">
           <label for="rags-search-key">API Key da OpenAI/Gemini</label>
           <input type="password" id="rags-search-key" placeholder="Cole sua API key..." autocomplete="off" />
         </div>
-        <button class="btn-primary" id="rags-search-btn">Buscar</button>
+        <button class="btn-primary" id="rags-search-btn" style="width:auto;flex-shrink:0;padding:14px 24px">Buscar</button>
       </div>
       <div id="rags-list" class="rags-list"></div>
     </section>
