@@ -16,8 +16,55 @@ import json
 import argparse
 import time
 import re
+import socket
+import ipaddress
 import unicodedata
 from pathlib import Path
+
+
+# ─── Bloqueio de SSRF: valida host/IP antes de qualquer fetch de URL externa ──
+def _is_public_url(url: str) -> tuple[bool, str]:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False, "esquema não permitido"
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "hostname ausente"
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False, "não foi possível resolver o hostname"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False, "endereço IP inválido"
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return False, "endereço interno/privado não permitido"
+    return True, ""
+
+
+def _safe_get(url: str, **kwargs):
+    """requests.get que valida o host (e cada redirecionamento) contra SSRF."""
+    import requests
+    from urllib.parse import urljoin
+    current = url
+    for _ in range(6):
+        ok, reason = _is_public_url(current)
+        if not ok:
+            raise ValueError(f"URL bloqueada ({reason}): {current}")
+        kw = dict(kwargs)
+        kw["allow_redirects"] = False
+        resp = requests.get(current, **kw)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+            current = urljoin(current, location)
+            continue
+        return resp
+    raise ValueError("Excesso de redirecionamentos.")
 
 
 def _emit(prefix: str, payload) -> None:
@@ -593,7 +640,7 @@ def _crawl_requests(current: str, depth: int, level: int,
 
     headers = {"User-Agent": "Mozilla/5.0 (RAG-crawler/1.0)"}
     try:
-        r = requests.get(current, timeout=12, headers=headers)
+        r = _safe_get(current, timeout=12, headers=headers)
         if "text/html" not in r.headers.get("Content-Type", ""):
             return
         from bs4 import BeautifulSoup
@@ -630,7 +677,15 @@ def _crawl_js(start: str, depth: int,
             visited.add(current)
 
             try:
+                ok, reason = _is_public_url(current)
+                if not ok:
+                    progress(f"Bloqueado ({reason}): {current}")
+                    continue
                 page.goto(current, wait_until="networkidle", timeout=25000)
+                ok, reason = _is_public_url(page.url)  # revalida após eventual redirecionamento
+                if not ok:
+                    progress(f"Bloqueado após redirecionamento ({reason}): {page.url}")
+                    continue
                 title = page.title() or current
                 html  = page.content()
                 pages.append({"title": title.strip(), "url": current})
@@ -711,7 +766,7 @@ def scrape_and_upload(api_key: str, provider: str, urls: list[str], name: str) -
 
     for i, url in enumerate(urls, 1):
         try:
-            r = requests.get(url, timeout=15, headers=headers)
+            r = _safe_get(url, timeout=15, headers=headers)
             parts.append(_extract_text(r.content, url))
             progress(f"[{i}/{len(urls)}] Extraído: {url}")
         except Exception as e:

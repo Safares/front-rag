@@ -33,6 +33,14 @@ function detectProviderFromKey(apiKey) {
   return apiKey.trim().startsWith('sk-') ? 'openai' : 'gemini';
 }
 
+function hashKey(rawKey) {
+  return crypto.createHash('sha256').update(rawKey).digest();
+}
+
+function hashesMatch(hashA, hashB) {
+  return hashA.length === hashB.length && crypto.timingSafeEqual(hashA, hashB);
+}
+
 // ─── Bloqueia SSRF: rejeita URLs que resolvem para IP interno/privado ──
 function isPrivateIp(ip) {
   if (net.isIPv4(ip)) {
@@ -1212,9 +1220,12 @@ app.get('/api/docs', (_req, res) => {
       '/api/v1/rags/{jobId}': {
         get: {
           summary: 'Consulta o status/resultado da criação assíncrona de um RAG',
+          security: [{ bearerAuth: [] }],
+          description: 'Requer a mesma ai_key usada em POST /api/v1/rags, via header Authorization: Bearer {ai_key}.',
           parameters: [{ name: 'jobId', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             200: { description: 'running | done', content: { 'application/json': { schema: { type: 'object', properties: { status: { type: 'string', enum: ['running', 'done'] }, stage: { type: 'string' }, store_id: { type: 'string' }, provider: { type: 'string' }, file_count: { type: 'integer' }, api_key: { type: 'string' } } } } } },
+            401: { description: 'Authorization header ausente ou ai_key não confere com a que criou o job' },
             404: { description: 'Job não encontrado' },
             500: { description: 'Erro durante a criação' },
           },
@@ -1307,7 +1318,10 @@ app.post('/api/v1/rags', async (req, res) => {
   const provider = detectProviderFromKey(aiKey);
   const ragName  = name || hostname;
   const jobId    = crypto.randomBytes(24).toString('hex');
-  jobs.set(jobId, { emitter: new EventEmitter(), status: 'running', stage: 'crawling', result: null, error: null });
+  jobs.set(jobId, {
+    emitter: new EventEmitter(), status: 'running', stage: 'crawling', result: null, error: null,
+    creatorKeyHash: hashKey(aiKey),
+  });
 
   res.status(202).json({ job_id: jobId });
 
@@ -1354,9 +1368,18 @@ app.post('/api/v1/rags', async (req, res) => {
 });
 
 // ─── GET /api/v1/rags/:jobId — status da criação assíncrona ────
+// Exige a mesma ai_key usada para criar o job (Authorization: Bearer) —
+// sem isso, qualquer um que soubesse/adivinhasse o jobId poderia ler o
+// api_key do RAG recém-criado na resposta.
 app.get('/api/v1/rags/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'job não encontrado.' });
+
+  const authHeader = req.headers['authorization'] || '';
+  const aiKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!aiKey || !hashesMatch(hashKey(aiKey), job.creatorKeyHash)) {
+    return res.status(401).json({ error: 'Authorization header obrigatório: Bearer {ai_key usada na criação}' });
+  }
 
   if (job.status === 'running') return res.json({ status: 'running', stage: job.stage });
   if (job.status === 'error')   return res.status(500).json({ status: 'error', error: job.error });
